@@ -1,0 +1,90 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/services/NotificationService.ts",
+    "content_hash": "sha256:ts_interface_mock_001",
+    "analyzer": "oxc-parser@1.0.0",
+    "dependencies": {
+      "EmailSender": "contract_sha256:discovered",
+      "Logger": "contract_sha256:discovered"
+    }
+  },
+  "fixtures": {},
+  "targets": [
+    {
+      "id": "NotificationService.sendWelcome",
+      "kind": "method",
+      "signature": {
+        "constructor_args": [
+          { "name": "emailSender", "param_type": "EmailSender", "constraints": [], "default_value": null },
+          { "name": "logger", "param_type": "Logger", "constraints": [], "default_value": null }
+        ],
+        "parameters": [
+          { "name": "userId", "param_type": "string", "constraints": ["non-empty"], "default_value": null },
+          { "name": "email", "param_type": "string", "constraints": ["non-empty"], "default_value": null }
+        ],
+        "return_type": "Promise<void>"
+      },
+      "detected_side_effects": [
+        { "effect_type": "service_call", "target": "emailSender.send", "mockable": true },
+        { "effect_type": "service_call", "target": "logger.info", "mockable": true }
+      ],
+      "scenarios": [
+        {
+          "name": "sends_email_and_logs_success",
+          "mode": "symbolic_contract",
+          "locked": true,
+          "stale": false,
+          "tags": ["ts_profile", "interface_mock", "multi_dependency"],
+          "mocks": [
+            {
+              "target": "emailSender.send",
+              "when_args": [{ "$matcher": "any" }, { "$matcher": "regex", "pattern": "^Welcome" }],
+              "returns": [{ "value": true }],
+              "expect_calls": 1
+            },
+            {
+              "target": "logger.info",
+              "when_args": [{ "$matcher": "any" }],
+              "returns": [],
+              "expect_calls": 1
+            }
+          ],
+          "inputs": ["user-001", "alice@example.com"],
+          "expected": {
+            "outcome": "return"
+          }
+        },
+        {
+          "name": "propagates_sender_error",
+          "mode": "symbolic_contract",
+          "locked": true,
+          "stale": false,
+          "tags": ["ts_profile", "interface_mock", "error_propagation"],
+          "mocks": [
+            {
+              "target": "emailSender.send",
+              "when_args": [{ "$matcher": "any" }, { "$matcher": "any" }],
+              "returns": [{ "exception": { "type": "SmtpError", "message": "Connection refused" } }],
+              "expect_calls": 1
+            },
+            {
+              "target": "logger.info",
+              "returns": [],
+              "expect_calls": 0
+            }
+          ],
+          "inputs": ["user-001", "alice@example.com"],
+          "expected": {
+            "outcome": "throw",
+            "exception": {
+              "type": "SmtpError",
+              "message": "Connection refused"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

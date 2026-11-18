@@ -1,0 +1,72 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/models/Result.ts",
+    "content_hash": "sha256:ts_union_types_001",
+    "analyzer": "oxc-parser@1.0.0",
+    "dependencies": {}
+  },
+  "fixtures": {
+    "success_result": {
+      "$type": "Result",
+      "$factory": "ok",
+      "$ctor": [42]
+    },
+    "error_result": {
+      "$type": "Result",
+      "$factory": "err",
+      "$ctor": ["not found"]
+    }
+  },
+  "targets": [
+    {
+      "id": "Result.map",
+      "kind": "method",
+      "signature": {
+        "constructor_args": [],
+        "parameters": [
+          { "name": "fn", "param_type": "(value: T) => U", "constraints": [], "default_value": null }
+        ],
+        "return_type": "Result<U, E>"
+      },
+      "detected_side_effects": [],
+      "scenarios": [
+        {
+          "name": "map_transforms_ok_value",
+          "mode": "symbolic_contract",
+          "locked": true,
+          "stale": false,
+          "tags": ["ts_profile", "union_type", "discriminated"],
+          "mocks": [],
+          "inputs": [],
+          "expected": {
+            "outcome": "return",
+            "properties": {
+              "kind": "ok",
+              "value": 84
+            }
+          },
+          "description": "Result.ok(42).map(x => x * 2) should produce Result.ok(84)"
+        },
+        {
+          "name": "map_preserves_err",
+          "mode": "symbolic_contract",
+          "locked": true,
+          "stale": false,
+          "tags": ["ts_profile", "union_type", "discriminated"],
+          "mocks": [],
+          "inputs": [],
+          "expected": {
+            "outcome": "return",
+            "properties": {
+              "kind": "err",
+              "error": "not found"
+            }
+          },
+          "description": "Result.err('not found').map(x => x * 2) should preserve the error unchanged"
+        }
+      ]
+    }
+  ]
+}

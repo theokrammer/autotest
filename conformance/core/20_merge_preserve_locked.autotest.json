@@ -1,0 +1,44 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/Vat/CustomVatCalculator.php",
+    "content_hash": "sha256:0123456789abcdef0123456789abcdef",
+    "analyzer": "conformance-harness@1.0.0"
+  },
+  "targets": [
+    {
+      "id": "App\\Vat\\CustomVatCalculator::calculateCustomRate",
+      "kind": "method",
+      "signature": {
+        "parameters": [
+          {
+            "name": "rate",
+            "type": "float"
+          }
+        ],
+        "return_type": "float"
+      },
+      "scenarios": [
+        {
+          "name": "custom_curated_locked_case",
+          "mode": "manual",
+          "locked": true,
+          "stale": false,
+          "tags": [
+            "curated",
+            "locked_preserve"
+          ],
+          "inputs": {
+            "rate": 0.25
+          },
+          "expected": {
+            "outcome": "return",
+            "type": "float",
+            "value": 125.0
+          }
+        }
+      ]
+    }
+  ]
+}

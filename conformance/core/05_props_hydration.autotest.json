@@ -1,0 +1,51 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/User/ProfileManager.php",
+    "content_hash": "sha256:0123456789abcdef0123456789abcdef",
+    "analyzer": "conformance-harness@1.0.0"
+  },
+  "targets": [
+    {
+      "id": "App\\User\\ProfileManager::validateProfile",
+      "kind": "method",
+      "signature": {
+        "parameters": [
+          {
+            "name": "profile",
+            "type": "App\\DTO\\UserProfile"
+          }
+        ],
+        "return_type": "bool"
+      },
+      "scenarios": [
+        {
+          "name": "hydrate_profile_via_props",
+          "mode": "symbolic_contract",
+          "locked": false,
+          "stale": false,
+          "tags": [
+            "hydration",
+            "props"
+          ],
+          "inputs": {
+            "profile": {
+              "$props": {
+                "active": true,
+                "email": "alice@example.com",
+                "id": 42
+              },
+              "$type": "App\\DTO\\UserProfile"
+            }
+          },
+          "expected": {
+            "outcome": "return",
+            "type": "bool",
+            "value": true
+          }
+        }
+      ]
+    }
+  ]
+}

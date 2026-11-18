@@ -1,0 +1,47 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/App/Billing/CustomFactorySample.php",
+    "content_hash": "sha256:c3d4e5f6a1b2",
+    "analyzer": "mago-analyzer@1.59.0",
+    "dependencies": {}
+  },
+  "fixtures": {},
+  "targets": [
+    {
+      "id": "App\\Billing\\CustomFactorySample::formatMoney",
+      "kind": "method",
+      "signature": {
+        "constructor_args": [],
+        "parameters": [
+          { "name": "money", "type": "App\\Billing\\Money" }
+        ],
+        "return_type": "string"
+      },
+      "detected_side_effects": [],
+      "scenarios": [
+        {
+          "name": "custom_factory_resolution",
+          "mode": "symbolic_contract",
+          "locked": true,
+          "stale": false,
+          "tags": ["php_profile", "custom_factory"],
+          "mocks": [],
+          "inputs": {
+            "money": {
+              "$type": "App\\Billing\\Money",
+              "$factory": "fromCents",
+              "$ctor": [1500, "EUR"]
+            }
+          },
+          "expected": {
+            "outcome": "return",
+            "type": "string",
+            "value": "15.00 EUR"
+          }
+        }
+      ]
+    }
+  ]
+}

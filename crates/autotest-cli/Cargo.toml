@@ -1,0 +1,32 @@
+[package]
+name = "autotest-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "autotest_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "autotest"
+path = "src/main.rs"
+
+[dependencies]
+autotest-core = { path = "../autotest-core" }
+autotest-proto = { path = "../autotest-proto" }
+autotest-sandbox = { path = "../autotest-sandbox" }
+autotest-php-extractor = { path = "../autotest-php-extractor" }
+autotest-ts-precheck = { path = "../autotest-ts-precheck" }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

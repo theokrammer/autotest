@@ -1,0 +1,15 @@
+[package]
+name = "autotest-ts-precheck"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+autotest-core = { path = "../autotest-core" }
+autotest-proto = { path = "../autotest-proto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+sha2 = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

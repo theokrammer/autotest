@@ -1,0 +1,109 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/services/UserService.ts",
+    "content_hash": "sha256:ts_optional_chaining_001",
+    "analyzer": "oxc-parser@1.0.0",
+    "dependencies": {
+      "UserRepository": "contract_sha256:discovered"
+    }
+  },
+  "fixtures": {
+    "user_with_address": {
+      "id": "u-001",
+      "name": "Alice",
+      "address": {
+        "city": "Berlin",
+        "zip": "10115"
+      }
+    },
+    "user_without_address": {
+      "id": "u-002",
+      "name": "Bob",
+      "address": null
+    }
+  },
+  "targets": [
+    {
+      "id": "UserService.getUserCity",
+      "kind": "method",
+      "signature": {
+        "constructor_args": [
+          { "name": "repo", "param_type": "UserRepository", "constraints": [], "default_value": null }
+        ],
+        "parameters": [
+          { "name": "userId", "param_type": "string", "constraints": ["non-empty"], "default_value": null }
+        ],
+        "return_type": "string | undefined"
+      },
+      "detected_side_effects": [
+        { "effect_type": "service_call", "target": "repo.findById", "mockable": true }
+      ],
+      "scenarios": [
+        {
+          "name": "returns_city_via_optional_chain",
+          "mode": "symbolic_contract",
+          "locked": true,
+          "stale": false,
+          "tags": ["ts_profile", "optional_chaining"],
+          "mocks": [
+            {
+              "target": "repo.findById",
+              "when_args": ["u-001"],
+              "returns": [{ "value": { "$ref": "#/fixtures/user_with_address" } }],
+              "expect_calls": 1
+            }
+          ],
+          "inputs": ["u-001"],
+          "expected": {
+            "outcome": "return",
+            "value": "Berlin"
+          },
+          "description": "user?.address?.city resolves to 'Berlin' when address exists"
+        },
+        {
+          "name": "returns_undefined_when_address_null",
+          "mode": "symbolic_contract",
+          "locked": true,
+          "stale": false,
+          "tags": ["ts_profile", "optional_chaining", "nullish"],
+          "mocks": [
+            {
+              "target": "repo.findById",
+              "when_args": ["u-002"],
+              "returns": [{ "value": { "$ref": "#/fixtures/user_without_address" } }],
+              "expect_calls": 1
+            }
+          ],
+          "inputs": ["u-002"],
+          "expected": {
+            "outcome": "return",
+            "type": "null"
+          },
+          "description": "user?.address?.city is undefined when address is null"
+        },
+        {
+          "name": "returns_undefined_when_user_not_found",
+          "mode": "symbolic_contract",
+          "locked": true,
+          "stale": false,
+          "tags": ["ts_profile", "optional_chaining", "nullish"],
+          "mocks": [
+            {
+              "target": "repo.findById",
+              "when_args": ["u-999"],
+              "returns": [{ "value": null }],
+              "expect_calls": 1
+            }
+          ],
+          "inputs": ["u-999"],
+          "expected": {
+            "outcome": "return",
+            "type": "null"
+          }
+        }
+      ]
+    }
+  ]
+}

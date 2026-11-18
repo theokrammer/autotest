@@ -1,0 +1,11 @@
+{
+  "name": "@autotest/jest",
+  "version": "0.1.0",
+  "description": "Jest and Vitest runtime hydrator for autotest scenarios",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "node test/hydrator.test.js"
+  },
+  "keywords": ["autotest", "jest", "vitest", "hydrator", "testing"],
+  "license": "MIT OR Apache-2.0"
+}

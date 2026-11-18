@@ -1,0 +1,101 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/Tax/MultiCurrencyTaxCalculator.php",
+    "content_hash": "sha256:0123456789abcdef0123456789abcdef",
+    "analyzer": "conformance-harness@1.0.0"
+  },
+  "fixtures": {
+    "mock_currency_converter": {
+      "target": "CurrencyConverter::getExchangeRate",
+      "when_args": [
+        "USD",
+        "EUR"
+      ],
+      "returns": [
+        {
+          "return": 0.92
+        }
+      ],
+      "expect_calls": 1
+    },
+    "mock_tax_repo": {
+      "target": "TaxRepository::getRate",
+      "when_args": [
+        "DE"
+      ],
+      "returns": [
+        {
+          "return": 0.19
+        }
+      ],
+      "expect_calls": 1
+    }
+  },
+  "targets": [
+    {
+      "id": "App\\Tax\\MultiCurrencyTaxCalculator::calculateConvertedTax",
+      "kind": "method",
+      "signature": {
+        "parameters": [
+          {
+            "name": "country",
+            "type": "string"
+          },
+          {
+            "name": "currency",
+            "type": "string"
+          },
+          {
+            "name": "amount",
+            "type": "float"
+          }
+        ],
+        "return_type": "float"
+      },
+      "detected_side_effects": [
+        {
+          "type": "method_call",
+          "target": "TaxRepository::getRate",
+          "mockable": true
+        },
+        {
+          "type": "method_call",
+          "target": "CurrencyConverter::getExchangeRate",
+          "mockable": true
+        }
+      ],
+      "scenarios": [
+        {
+          "name": "calculate_converted_tax",
+          "mode": "symbolic_contract",
+          "locked": false,
+          "stale": false,
+          "tags": [
+            "multi_currency",
+            "ref_resolution"
+          ],
+          "mocks": [
+            {
+              "$ref": "#/fixtures/mock_tax_repo"
+            },
+            {
+              "$ref": "#/fixtures/mock_currency_converter"
+            }
+          ],
+          "inputs": {
+            "amount": 100.0,
+            "country": "DE",
+            "currency": "USD"
+          },
+          "expected": {
+            "outcome": "return",
+            "type": "float",
+            "value": 17.48
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/Billing/DiscountService.php",
+    "content_hash": "sha256:0123456789abcdef0123456789abcdef",
+    "analyzer": "conformance-harness@1.0.0"
+  },
+  "targets": [
+    {
+      "id": "App\\Billing\\DiscountService::calculateDiscount",
+      "kind": "method",
+      "signature": {
+        "parameters": [
+          {
+            "name": "amount",
+            "type": "float",
+            "constraints": [
+              ">= 0.0"
+            ]
+          }
+        ],
+        "return_type": "float"
+      },
+      "scenarios": [
+        {
+          "name": "guard_amount_negative_throws",
+          "mode": "symbolic_contract",
+          "locked": false,
+          "stale": false,
+          "tags": [
+            "guard_clause",
+            "negative"
+          ],
+          "inputs": {
+            "amount": -0.01
+          },
+          "expected": {
+            "outcome": "exception",
+            "exception_type": "InvalidArgumentException",
+            "message_contains": "amount"
+          }
+        }
+      ]
+    }
+  ]
+}

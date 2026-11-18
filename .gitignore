@@ -1,0 +1,8 @@
+/target
+**/*.staging.json
+.autotest/cache/
+node_modules/
+vendor/
+.DS_Store
+*.log
+

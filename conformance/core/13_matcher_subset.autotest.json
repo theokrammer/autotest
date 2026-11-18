@@ -1,0 +1,79 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/Security/AdminGate.php",
+    "content_hash": "sha256:0123456789abcdef0123456789abcdef",
+    "analyzer": "conformance-harness@1.0.0"
+  },
+  "fixtures": {
+    "mock_auth_guard": {
+      "target": "AuthGuard::verifyClaims",
+      "when_args": [
+        {
+          "$matcher": "subset",
+          "value": {
+            "role": "admin"
+          }
+        }
+      ],
+      "returns": [
+        {
+          "return": true
+        }
+      ],
+      "expect_calls": 1
+    }
+  },
+  "targets": [
+    {
+      "id": "App\\Security\\AdminGate::canAccess",
+      "kind": "method",
+      "signature": {
+        "parameters": [
+          {
+            "name": "session",
+            "type": "array"
+          }
+        ],
+        "return_type": "bool"
+      },
+      "detected_side_effects": [
+        {
+          "type": "method_call",
+          "target": "AuthGuard::verifyClaims",
+          "mockable": true
+        }
+      ],
+      "scenarios": [
+        {
+          "name": "match_subset_argument",
+          "mode": "symbolic_contract",
+          "locked": false,
+          "stale": false,
+          "tags": [
+            "matcher",
+            "subset"
+          ],
+          "mocks": [
+            {
+              "$ref": "#/fixtures/mock_auth_guard"
+            }
+          ],
+          "inputs": {
+            "session": {
+              "role": "admin",
+              "token": "xyz",
+              "userId": "usr_99"
+            }
+          },
+          "expected": {
+            "outcome": "return",
+            "type": "bool",
+            "value": true
+          }
+        }
+      ]
+    }
+  ]
+}

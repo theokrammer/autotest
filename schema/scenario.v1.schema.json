@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "title": "Autotest Scenario Schema v1.0",
+  "type": "object",
+  "required": ["schema_version", "source", "targets"],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "string",
+      "enum": ["1.0"]
+    },
+    "source": {
+      "type": "object",
+      "required": ["file", "content_hash", "analyzer"],
+      "properties": {
+        "file": { "type": "string" },
+        "content_hash": { "type": "string" },
+        "analyzer": { "type": "string" },
+        "dependencies": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "fixtures": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["target"],
+        "properties": {
+          "target": { "type": "string" },
+          "when_args": {
+            "type": "array",
+            "items": {}
+          },
+          "returns": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "return": {},
+                "exception": {
+                  "type": "object",
+                  "required": ["type"],
+                  "properties": {
+                    "type": { "type": "string" },
+                    "message": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "mutate_args": {
+            "type": "object"
+          },
+          "expect_calls": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "targets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "signature", "scenarios"],
+        "properties": {
+          "id": { "type": "string" },
+          "kind": {
+            "type": "string",
+            "enum": ["method", "function", "http_endpoint"]
+          },
+          "signature": {
+            "type": "object",
+            "properties": {
+              "constructor_args": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["name", "type"],
+                  "properties": {
+                    "name": { "type": "string" },
+                    "type": { "type": "string" },
+                    "constraints": {
+                      "type": "array",
+                      "items": { "type": "string" }
+                    },
+                    "default_value": {}
+                  }
+                }
+              },
+              "parameters": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["name", "type"],
+                  "properties": {
+                    "name": { "type": "string" },
+                    "type": { "type": "string" },
+                    "constraints": {
+                      "type": "array",
+                      "items": { "type": "string" }
+                    },
+                    "default_value": {}
+                  }
+                }
+              },
+              "return_type": { "type": "string" }
+            }
+          },
+          "detected_side_effects": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["type", "target", "mockable"],
+              "properties": {
+                "type": { "type": "string" },
+                "target": { "type": "string" },
+                "mockable": { "type": "boolean" }
+              }
+            }
+          },
+          "scenarios": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "mode", "locked", "stale", "inputs", "expected"],
+              "properties": {
+                "name": { "type": "string" },
+                "mode": {
+                  "type": "string",
+                  "enum": ["symbolic_contract", "recorded", "manual"]
+                },
+                "locked": { "type": "boolean" },
+                "stale": { "type": "boolean" },
+                "tags": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "mocks": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "$ref": { "type": "string" },
+                      "target": { "type": "string" },
+                      "when_args": { "type": "array" },
+                      "returns": { "type": "array" },
+                      "mutate_args": { "type": "object" },
+                      "expect_calls": { "type": "integer" }
+                    }
+                  }
+                },
+                "inputs": {
+                  "type": "object"
+                },
+                "expected": {
+                  "type": "object",
+                  "required": ["outcome"],
+                  "properties": {
+                    "outcome": {
+                      "type": "string",
+                      "enum": ["return", "exception", "no_crash"]
+                    },
+                    "type": { "type": "string" },
+                    "value": {},
+                    "exception_type": { "type": "string" },
+                    "message_contains": { "type": "string" },
+                    "expected_events": {
+                      "type": "array",
+                      "items": {}
+                    }
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

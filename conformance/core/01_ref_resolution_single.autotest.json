@@ -1,0 +1,81 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/Tax/TaxCalculator.php",
+    "content_hash": "sha256:0123456789abcdef0123456789abcdef",
+    "analyzer": "conformance-harness@1.0.0"
+  },
+  "fixtures": {
+    "mock_tax_repo": {
+      "target": "TaxRepository::getRate",
+      "when_args": [
+        "DE"
+      ],
+      "returns": [
+        {
+          "return": 0.19
+        }
+      ],
+      "expect_calls": 1
+    }
+  },
+  "targets": [
+    {
+      "id": "App\\Tax\\TaxCalculator::calculateTax",
+      "kind": "method",
+      "signature": {
+        "parameters": [
+          {
+            "name": "country",
+            "type": "string",
+            "constraints": [
+              "non-empty-string"
+            ]
+          },
+          {
+            "name": "netAmount",
+            "type": "float",
+            "constraints": [
+              ">= 0.0"
+            ]
+          }
+        ],
+        "return_type": "float"
+      },
+      "detected_side_effects": [
+        {
+          "type": "method_call",
+          "target": "TaxRepository::getRate",
+          "mockable": true
+        }
+      ],
+      "scenarios": [
+        {
+          "name": "calculate_tax_de",
+          "mode": "symbolic_contract",
+          "locked": false,
+          "stale": false,
+          "tags": [
+            "tax",
+            "ref_resolution"
+          ],
+          "mocks": [
+            {
+              "$ref": "#/fixtures/mock_tax_repo"
+            }
+          ],
+          "inputs": {
+            "country": "DE",
+            "netAmount": 100.0
+          },
+          "expected": {
+            "outcome": "return",
+            "type": "float",
+            "value": 19.0
+          }
+        }
+      ]
+    }
+  ]
+}

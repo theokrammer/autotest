@@ -1,0 +1,58 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/App/Billing/OrderNotifier.php",
+    "content_hash": "sha256:e5f6a1b2c3d4",
+    "analyzer": "mago-analyzer@1.59.0",
+    "dependencies": {
+      "App\\Billing\\MailerInterface": "contract_sha256:f1a2b3"
+    }
+  },
+  "fixtures": {
+    "mock_mailer_send": {
+      "target": "mailer.send",
+      "when_args": [
+        { "$matcher": "regex", "pattern": "^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$" }
+      ],
+      "returns": [{ "return": true }],
+      "expect_calls": 1
+    }
+  },
+  "targets": [
+    {
+      "id": "App\\Billing\\OrderNotifier::notifyCustomer",
+      "kind": "method",
+      "signature": {
+        "constructor_args": [
+          { "name": "mailer", "type": "App\\Billing\\MailerInterface" }
+        ],
+        "parameters": [
+          { "name": "email", "type": "string", "constraints": ["non-empty-string"] }
+        ],
+        "return_type": "bool"
+      },
+      "detected_side_effects": [
+        { "type": "interface_call", "target": "mailer.send", "mockable": true }
+      ],
+      "scenarios": [
+        {
+          "name": "notify_valid_email",
+          "mode": "symbolic_contract",
+          "locked": false,
+          "stale": false,
+          "tags": ["php_profile", "interface_mock"],
+          "mocks": [
+            { "$ref": "#/fixtures/mock_mailer_send" }
+          ],
+          "inputs": { "email": "test@example.com" },
+          "expected": {
+            "outcome": "return",
+            "type": "bool",
+            "value": true
+          }
+        }
+      ]
+    }
+  ]
+}

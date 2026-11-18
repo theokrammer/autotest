@@ -1,0 +1,60 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/Service/RefactoredService.php",
+    "content_hash": "sha256:0123456789abcdef0123456789abcdef",
+    "analyzer": "conformance-harness@1.0.0"
+  },
+  "fixtures": {
+    "removed_side_effect": {
+      "target": "LegacyService::obsoleteMethod",
+      "returns": [
+        {
+          "return": true
+        }
+      ],
+      "expect_calls": 1
+    }
+  },
+  "targets": [
+    {
+      "id": "App\\Service\\RefactoredService::handleTask",
+      "kind": "method",
+      "signature": {
+        "parameters": [
+          {
+            "name": "taskName",
+            "type": "string"
+          }
+        ],
+        "return_type": "bool"
+      },
+      "scenarios": [
+        {
+          "name": "drift_stale_due_to_removed_mock",
+          "mode": "manual",
+          "locked": true,
+          "stale": true,
+          "tags": [
+            "drift",
+            "mock_removed"
+          ],
+          "mocks": [
+            {
+              "$ref": "#/fixtures/removed_side_effect"
+            }
+          ],
+          "inputs": {
+            "taskName": "daily_sync"
+          },
+          "expected": {
+            "outcome": "return",
+            "type": "bool",
+            "value": true
+          }
+        }
+      ]
+    }
+  ]
+}

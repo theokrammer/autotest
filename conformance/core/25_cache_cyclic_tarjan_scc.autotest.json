@@ -1,0 +1,48 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/Order/CircularOrderService.php",
+    "content_hash": "sha256:0123456789abcdef0123456789abcdef",
+    "analyzer": "conformance-harness@1.0.0",
+    "dependencies": {
+      "App\\Service\\BillingService": "contract_sha256:aaaa1111bbbb2222",
+      "App\\Service\\InvoiceService": "contract_sha256:cccc3333dddd4444"
+    }
+  },
+  "targets": [
+    {
+      "id": "App\\Order\\CircularOrderService::processOrder",
+      "kind": "method",
+      "signature": {
+        "parameters": [
+          {
+            "name": "orderId",
+            "type": "string"
+          }
+        ],
+        "return_type": "bool"
+      },
+      "scenarios": [
+        {
+          "name": "tarjan_scc_cyclic_scenario",
+          "mode": "symbolic_contract",
+          "locked": false,
+          "stale": false,
+          "tags": [
+            "cache",
+            "cyclic_tarjan_scc"
+          ],
+          "inputs": {
+            "orderId": "ORD-42"
+          },
+          "expected": {
+            "outcome": "return",
+            "type": "bool",
+            "value": true
+          }
+        }
+      ]
+    }
+  ]
+}

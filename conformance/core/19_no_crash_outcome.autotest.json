@@ -1,0 +1,43 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/Diagnostics/HeartbeatSender.php",
+    "content_hash": "sha256:0123456789abcdef0123456789abcdef",
+    "analyzer": "conformance-harness@1.0.0"
+  },
+  "targets": [
+    {
+      "id": "App\\Diagnostics\\HeartbeatSender::pulse",
+      "kind": "method",
+      "signature": {
+        "parameters": [
+          {
+            "name": "payload",
+            "type": "array"
+          }
+        ]
+      },
+      "scenarios": [
+        {
+          "name": "heartbeat_executes_without_crash",
+          "mode": "symbolic_contract",
+          "locked": false,
+          "stale": false,
+          "tags": [
+            "no_crash",
+            "void_method"
+          ],
+          "inputs": {
+            "payload": {
+              "event": "HEARTBEAT"
+            }
+          },
+          "expected": {
+            "outcome": "no_crash"
+          }
+        }
+      ]
+    }
+  ]
+}

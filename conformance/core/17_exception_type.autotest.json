@@ -1,0 +1,43 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/Repository/ItemRepository.php",
+    "content_hash": "sha256:0123456789abcdef0123456789abcdef",
+    "analyzer": "conformance-harness@1.0.0"
+  },
+  "targets": [
+    {
+      "id": "App\\Repository\\ItemRepository::findById",
+      "kind": "method",
+      "signature": {
+        "parameters": [
+          {
+            "name": "id",
+            "type": "string"
+          }
+        ],
+        "return_type": "App\\Entity\\Item"
+      },
+      "scenarios": [
+        {
+          "name": "missing_item_throws_entity_not_found",
+          "mode": "symbolic_contract",
+          "locked": false,
+          "stale": false,
+          "tags": [
+            "exception",
+            "exception_type"
+          ],
+          "inputs": {
+            "id": "MISSING_ID_999"
+          },
+          "expected": {
+            "outcome": "exception",
+            "exception_type": "App\\Exception\\EntityNotFoundException"
+          }
+        }
+      ]
+    }
+  ]
+}

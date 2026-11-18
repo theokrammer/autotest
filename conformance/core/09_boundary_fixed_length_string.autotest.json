@@ -1,0 +1,47 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/Geo/CountryValidator.php",
+    "content_hash": "sha256:0123456789abcdef0123456789abcdef",
+    "analyzer": "conformance-harness@1.0.0"
+  },
+  "targets": [
+    {
+      "id": "App\\Geo\\CountryValidator::isSupportedCountry",
+      "kind": "method",
+      "signature": {
+        "parameters": [
+          {
+            "name": "countryCode",
+            "type": "string",
+            "constraints": [
+              "length == 2"
+            ]
+          }
+        ],
+        "return_type": "bool"
+      },
+      "scenarios": [
+        {
+          "name": "fixed_length_string_nominal",
+          "mode": "symbolic_contract",
+          "locked": false,
+          "stale": false,
+          "tags": [
+            "boundary",
+            "fixed_length"
+          ],
+          "inputs": {
+            "countryCode": "DE"
+          },
+          "expected": {
+            "outcome": "return",
+            "type": "bool",
+            "value": true
+          }
+        }
+      ]
+    }
+  ]
+}

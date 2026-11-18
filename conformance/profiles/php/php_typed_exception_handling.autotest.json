@@ -1,0 +1,41 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/App/Billing/ValidationSample.php",
+    "content_hash": "sha256:d4e5f6a1b2c3",
+    "analyzer": "mago-analyzer@1.59.0",
+    "dependencies": {}
+  },
+  "fixtures": {},
+  "targets": [
+    {
+      "id": "App\\Billing\\ValidationSample::validateAge",
+      "kind": "method",
+      "signature": {
+        "constructor_args": [],
+        "parameters": [
+          { "name": "age", "type": "int", "constraints": [">= 0"] }
+        ],
+        "return_type": "bool"
+      },
+      "detected_side_effects": [],
+      "scenarios": [
+        {
+          "name": "negative_age_throws_invalid_argument",
+          "mode": "symbolic_contract",
+          "locked": false,
+          "stale": false,
+          "tags": ["php_profile", "exceptions"],
+          "mocks": [],
+          "inputs": { "age": -5 },
+          "expected": {
+            "outcome": "exception",
+            "exception_type": "InvalidArgumentException",
+            "message_contains": "age"
+          }
+        }
+      ]
+    }
+  ]
+}

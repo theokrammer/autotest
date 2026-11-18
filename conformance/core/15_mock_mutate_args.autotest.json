@@ -1,0 +1,75 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/IO/BufferProcessor.php",
+    "content_hash": "sha256:0123456789abcdef0123456789abcdef",
+    "analyzer": "conformance-harness@1.0.0"
+  },
+  "fixtures": {
+    "mock_byte_reader": {
+      "target": "StreamReader::readInto",
+      "returns": [
+        {
+          "return": 4
+        }
+      ],
+      "mutate_args": {
+        "0": {
+          "bytesRead": 4,
+          "data": "OKAY"
+        }
+      },
+      "expect_calls": 1
+    }
+  },
+  "targets": [
+    {
+      "id": "App\\IO\\BufferProcessor::fillBuffer",
+      "kind": "method",
+      "signature": {
+        "parameters": [
+          {
+            "name": "buffer",
+            "type": "array"
+          }
+        ],
+        "return_type": "int"
+      },
+      "detected_side_effects": [
+        {
+          "type": "method_call",
+          "target": "StreamReader::readInto",
+          "mockable": true
+        }
+      ],
+      "scenarios": [
+        {
+          "name": "mutate_args_mock_behavior",
+          "mode": "symbolic_contract",
+          "locked": false,
+          "stale": false,
+          "tags": [
+            "mock",
+            "mutate_args"
+          ],
+          "mocks": [
+            {
+              "$ref": "#/fixtures/mock_byte_reader"
+            }
+          ],
+          "inputs": {
+            "buffer": {
+              "capacity": 1024
+            }
+          },
+          "expected": {
+            "outcome": "return",
+            "type": "int",
+            "value": 4
+          }
+        }
+      ]
+    }
+  ]
+}

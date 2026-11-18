@@ -1,0 +1,87 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/models/SecureWallet.ts",
+    "content_hash": "sha256:ts_private_props_001",
+    "analyzer": "oxc-parser@1.0.0",
+    "dependencies": {}
+  },
+  "fixtures": {},
+  "targets": [
+    {
+      "id": "SecureWallet.getBalance",
+      "kind": "method",
+      "signature": {
+        "constructor_args": [
+          { "name": "initialBalance", "param_type": "number", "constraints": ["finite", ">= 0"], "default_value": null }
+        ],
+        "parameters": [],
+        "return_type": "number"
+      },
+      "detected_side_effects": [],
+      "scenarios": [
+        {
+          "name": "returns_initial_balance_via_getter",
+          "mode": "symbolic_contract",
+          "locked": true,
+          "stale": false,
+          "tags": ["ts_profile", "private_field"],
+          "mocks": [],
+          "inputs": [],
+          "expected": {
+            "outcome": "return",
+            "type": "number",
+            "value": 1000
+          },
+          "setup_notes": "Constructor sets #balance = initialBalance. getBalance() returns this.#balance. The #private field is inaccessible from test code, so only the public getter can be tested."
+        }
+      ]
+    },
+    {
+      "id": "SecureWallet.withdraw",
+      "kind": "method",
+      "signature": {
+        "constructor_args": [
+          { "name": "initialBalance", "param_type": "number", "constraints": ["finite", ">= 0"], "default_value": null }
+        ],
+        "parameters": [
+          { "name": "amount", "param_type": "number", "constraints": ["finite", "> 0"], "default_value": null }
+        ],
+        "return_type": "boolean"
+      },
+      "detected_side_effects": [],
+      "scenarios": [
+        {
+          "name": "withdraw_within_balance_succeeds",
+          "mode": "symbolic_contract",
+          "locked": true,
+          "stale": false,
+          "tags": ["ts_profile", "private_field", "boundary"],
+          "mocks": [],
+          "inputs": [500],
+          "expected": {
+            "outcome": "return",
+            "value": true
+          }
+        },
+        {
+          "name": "withdraw_exceeding_balance_fails",
+          "mode": "symbolic_contract",
+          "locked": true,
+          "stale": false,
+          "tags": ["ts_profile", "private_field", "boundary"],
+          "mocks": [],
+          "inputs": [2000],
+          "expected": {
+            "outcome": "throw",
+            "exception": {
+              "type": "InsufficientFundsError",
+              "message": "Insufficient funds"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

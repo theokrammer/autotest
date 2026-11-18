@@ -1,0 +1,73 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/Order/BatchOrderProcessor.php",
+    "content_hash": "sha256:0123456789abcdef0123456789abcdef",
+    "analyzer": "conformance-harness@1.0.0"
+  },
+  "fixtures": {
+    "mock_audit_logger": {
+      "target": "AuditLogger::logEvent",
+      "when_args": [
+        "ORDER_PLACED"
+      ],
+      "returns": [
+        {
+          "return": null
+        }
+      ],
+      "expect_calls": 2
+    }
+  },
+  "targets": [
+    {
+      "id": "App\\Order\\BatchOrderProcessor::processBatch",
+      "kind": "method",
+      "signature": {
+        "parameters": [
+          {
+            "name": "orderIds",
+            "type": "array"
+          }
+        ],
+        "return_type": "int"
+      },
+      "detected_side_effects": [
+        {
+          "type": "method_call",
+          "target": "AuditLogger::logEvent",
+          "mockable": true
+        }
+      ],
+      "scenarios": [
+        {
+          "name": "verify_mock_call_count",
+          "mode": "symbolic_contract",
+          "locked": false,
+          "stale": false,
+          "tags": [
+            "mock",
+            "expect_calls"
+          ],
+          "mocks": [
+            {
+              "$ref": "#/fixtures/mock_audit_logger"
+            }
+          ],
+          "inputs": {
+            "orderIds": [
+              101,
+              102
+            ]
+          },
+          "expected": {
+            "outcome": "return",
+            "type": "int",
+            "value": 2
+          }
+        }
+      ]
+    }
+  ]
+}

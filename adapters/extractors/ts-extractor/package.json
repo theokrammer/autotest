@@ -1,0 +1,14 @@
+{
+  "name": "@autotest/ts-extractor",
+  "version": "0.1.0",
+  "description": "JSON-RPC 2.0 TypeScript Compiler API worker for autotest",
+  "main": "src/Worker.js",
+  "bin": {
+    "ts-extractor": "bin/ts-extractor"
+  },
+  "scripts": {
+    "test": "node test/worker.test.js"
+  },
+  "keywords": ["autotest", "typescript", "compiler-api", "extractor"],
+  "license": "MIT OR Apache-2.0"
+}

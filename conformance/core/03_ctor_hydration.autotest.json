@@ -1,0 +1,56 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/Payment/PaymentService.php",
+    "content_hash": "sha256:0123456789abcdef0123456789abcdef",
+    "analyzer": "conformance-harness@1.0.0"
+  },
+  "targets": [
+    {
+      "id": "App\\Payment\\PaymentService::applyVat",
+      "kind": "method",
+      "signature": {
+        "parameters": [
+          {
+            "name": "money",
+            "type": "App\\ValueObject\\Money"
+          }
+        ],
+        "return_type": "App\\ValueObject\\Money"
+      },
+      "scenarios": [
+        {
+          "name": "hydrate_money_via_ctor",
+          "mode": "symbolic_contract",
+          "locked": false,
+          "stale": false,
+          "tags": [
+            "hydration",
+            "ctor"
+          ],
+          "inputs": {
+            "money": {
+              "$ctor": [
+                10000,
+                "EUR"
+              ],
+              "$type": "App\\ValueObject\\Money"
+            }
+          },
+          "expected": {
+            "outcome": "return",
+            "type": "App\\ValueObject\\Money",
+            "value": {
+              "$ctor": [
+                11900,
+                "EUR"
+              ],
+              "$type": "App\\ValueObject\\Money"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

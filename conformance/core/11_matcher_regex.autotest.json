@@ -1,0 +1,73 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/User/UserRegistration.php",
+    "content_hash": "sha256:0123456789abcdef0123456789abcdef",
+    "analyzer": "conformance-harness@1.0.0"
+  },
+  "fixtures": {
+    "mock_email_sender": {
+      "target": "MailerGateway::sendWelcome",
+      "when_args": [
+        {
+          "$matcher": "regex",
+          "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+        }
+      ],
+      "returns": [
+        {
+          "return": true
+        }
+      ],
+      "expect_calls": 1
+    }
+  },
+  "targets": [
+    {
+      "id": "App\\User\\UserRegistration::register",
+      "kind": "method",
+      "signature": {
+        "parameters": [
+          {
+            "name": "email",
+            "type": "string"
+          }
+        ],
+        "return_type": "bool"
+      },
+      "detected_side_effects": [
+        {
+          "type": "method_call",
+          "target": "MailerGateway::sendWelcome",
+          "mockable": true
+        }
+      ],
+      "scenarios": [
+        {
+          "name": "match_regex_argument",
+          "mode": "symbolic_contract",
+          "locked": false,
+          "stale": false,
+          "tags": [
+            "matcher",
+            "regex"
+          ],
+          "mocks": [
+            {
+              "$ref": "#/fixtures/mock_email_sender"
+            }
+          ],
+          "inputs": {
+            "email": "test@example.com"
+          },
+          "expected": {
+            "outcome": "return",
+            "type": "bool",
+            "value": true
+          }
+        }
+      ]
+    }
+  ]
+}

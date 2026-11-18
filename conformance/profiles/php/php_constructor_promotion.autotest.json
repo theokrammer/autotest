@@ -1,0 +1,55 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/App/Billing/PromotedService.php",
+    "content_hash": "sha256:b2c3d4e5f6a1",
+    "analyzer": "mago-analyzer@1.59.0",
+    "dependencies": {
+      "App\\Billing\\TaxRepo": "contract_sha256:c1d2e3"
+    }
+  },
+  "fixtures": {
+    "mock_tax_repo": {
+      "target": "taxRepo.getRate",
+      "when_args": ["DE"],
+      "returns": [{ "return": 0.19 }]
+    }
+  },
+  "targets": [
+    {
+      "id": "App\\Billing\\PromotedService::getRate",
+      "kind": "method",
+      "signature": {
+        "constructor_args": [
+          { "name": "taxRepo", "type": "App\\Billing\\TaxRepo" }
+        ],
+        "parameters": [
+          { "name": "country", "type": "string", "constraints": ["length == 2"] }
+        ],
+        "return_type": "float"
+      },
+      "detected_side_effects": [
+        { "type": "interface_call", "target": "taxRepo.getRate", "mockable": true }
+      ],
+      "scenarios": [
+        {
+          "name": "promoted_readonly_repo_call",
+          "mode": "symbolic_contract",
+          "locked": false,
+          "stale": false,
+          "tags": ["php_profile", "constructor_promotion"],
+          "mocks": [
+            { "$ref": "#/fixtures/mock_tax_repo" }
+          ],
+          "inputs": { "country": "DE" },
+          "expected": {
+            "outcome": "return",
+            "type": "float",
+            "value": 0.19
+          }
+        }
+      ]
+    }
+  ]
+}

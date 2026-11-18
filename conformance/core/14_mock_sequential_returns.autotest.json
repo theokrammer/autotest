@@ -1,0 +1,77 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/Auth/TokenPool.php",
+    "content_hash": "sha256:0123456789abcdef0123456789abcdef",
+    "analyzer": "conformance-harness@1.0.0"
+  },
+  "fixtures": {
+    "mock_token_sequence": {
+      "target": "TokenProvider::nextToken",
+      "returns": [
+        {
+          "return": "token_alpha"
+        },
+        {
+          "return": "token_beta"
+        },
+        {
+          "return": "token_gamma"
+        }
+      ],
+      "expect_calls": 3
+    }
+  },
+  "targets": [
+    {
+      "id": "App\\Auth\\TokenPool::fetchBatch",
+      "kind": "method",
+      "signature": {
+        "parameters": [
+          {
+            "name": "count",
+            "type": "int"
+          }
+        ],
+        "return_type": "array"
+      },
+      "detected_side_effects": [
+        {
+          "type": "method_call",
+          "target": "TokenProvider::nextToken",
+          "mockable": true
+        }
+      ],
+      "scenarios": [
+        {
+          "name": "sequential_mock_returns",
+          "mode": "symbolic_contract",
+          "locked": false,
+          "stale": false,
+          "tags": [
+            "mock",
+            "sequential_returns"
+          ],
+          "mocks": [
+            {
+              "$ref": "#/fixtures/mock_token_sequence"
+            }
+          ],
+          "inputs": {
+            "count": 3
+          },
+          "expected": {
+            "outcome": "return",
+            "type": "array",
+            "value": [
+              "token_alpha",
+              "token_beta",
+              "token_gamma"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

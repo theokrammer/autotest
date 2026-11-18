@@ -1,0 +1,58 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/Payment/FactoryService.php",
+    "content_hash": "sha256:0123456789abcdef0123456789abcdef",
+    "analyzer": "conformance-harness@1.0.0"
+  },
+  "targets": [
+    {
+      "id": "App\\Payment\\FactoryService::processNamedFactory",
+      "kind": "method",
+      "signature": {
+        "parameters": [
+          {
+            "name": "money",
+            "type": "App\\ValueObject\\Money"
+          }
+        ],
+        "return_type": "App\\ValueObject\\Money"
+      },
+      "scenarios": [
+        {
+          "name": "hydrate_money_via_factory",
+          "mode": "symbolic_contract",
+          "locked": false,
+          "stale": false,
+          "tags": [
+            "hydration",
+            "factory"
+          ],
+          "inputs": {
+            "money": {
+              "$ctor": [
+                5000,
+                "USD"
+              ],
+              "$factory": "fromCents",
+              "$type": "App\\ValueObject\\Money"
+            }
+          },
+          "expected": {
+            "outcome": "return",
+            "type": "App\\ValueObject\\Money",
+            "value": {
+              "$ctor": [
+                5950,
+                "USD"
+              ],
+              "$factory": "fromCents",
+              "$type": "App\\ValueObject\\Money"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

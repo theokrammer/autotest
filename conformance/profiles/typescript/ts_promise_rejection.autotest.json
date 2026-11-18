@@ -1,0 +1,86 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/services/PaymentService.ts",
+    "content_hash": "sha256:ts_promise_rejection_001",
+    "analyzer": "oxc-parser@1.0.0",
+    "dependencies": {
+      "PaymentGateway": "contract_sha256:discovered"
+    }
+  },
+  "fixtures": {
+    "valid_order": {
+      "orderId": "ORD-001",
+      "amount": 99.99,
+      "currency": "EUR"
+    }
+  },
+  "targets": [
+    {
+      "id": "PaymentService.processPayment",
+      "kind": "method",
+      "signature": {
+        "constructor_args": [
+          { "name": "gateway", "param_type": "PaymentGateway", "constraints": [], "default_value": null }
+        ],
+        "parameters": [
+          { "name": "orderId", "param_type": "string", "constraints": ["non-empty"], "default_value": null },
+          { "name": "amount", "param_type": "number", "constraints": ["finite", "> 0"], "default_value": null }
+        ],
+        "return_type": "Promise<PaymentResult>"
+      },
+      "detected_side_effects": [
+        { "effect_type": "service_call", "target": "gateway.charge", "mockable": true }
+      ],
+      "scenarios": [
+        {
+          "name": "promise_resolves_on_success",
+          "mode": "symbolic_contract",
+          "locked": true,
+          "stale": false,
+          "tags": ["ts_profile", "promise"],
+          "mocks": [
+            {
+              "target": "gateway.charge",
+              "when_args": ["ORD-001", { "$matcher": "gt", "value": 0 }],
+              "returns": [{ "value": { "success": true, "txId": "TX-999" } }],
+              "expect_calls": 1
+            }
+          ],
+          "inputs": ["ORD-001", 99.99],
+          "expected": {
+            "outcome": "return",
+            "properties": {
+              "success": true,
+              "txId": "TX-999"
+            }
+          }
+        },
+        {
+          "name": "promise_rejects_on_gateway_failure",
+          "mode": "symbolic_contract",
+          "locked": true,
+          "stale": false,
+          "tags": ["ts_profile", "promise", "rejection"],
+          "mocks": [
+            {
+              "target": "gateway.charge",
+              "when_args": [{ "$matcher": "any" }, { "$matcher": "any" }],
+              "returns": [{ "reject": { "type": "GatewayError", "message": "Card declined" } }],
+              "expect_calls": 1
+            }
+          ],
+          "inputs": ["ORD-002", 50.00],
+          "expected": {
+            "outcome": "throw",
+            "exception": {
+              "type": "GatewayError",
+              "message": "Card declined"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

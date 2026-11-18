@@ -1,0 +1,42 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/App/Billing/StrictTypesSample.php",
+    "content_hash": "sha256:a1b2c3d4e5f6",
+    "analyzer": "mago-analyzer@1.59.0",
+    "dependencies": {}
+  },
+  "fixtures": {},
+  "targets": [
+    {
+      "id": "App\\Billing\\StrictTypesSample::add",
+      "kind": "method",
+      "signature": {
+        "constructor_args": [],
+        "parameters": [
+          { "name": "a", "type": "int", "constraints": ["finite"] },
+          { "name": "b", "type": "int", "constraints": ["finite"] }
+        ],
+        "return_type": "int"
+      },
+      "detected_side_effects": [],
+      "scenarios": [
+        {
+          "name": "strict_types_int_exact",
+          "mode": "symbolic_contract",
+          "locked": true,
+          "stale": false,
+          "tags": ["php_profile", "strict_types"],
+          "mocks": [],
+          "inputs": { "a": 5, "b": 10 },
+          "expected": {
+            "outcome": "return",
+            "type": "int",
+            "value": 15
+          }
+        }
+      ]
+    }
+  ]
+}

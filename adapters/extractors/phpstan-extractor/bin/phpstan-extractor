@@ -1,0 +1,28 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+require_once __DIR__ . '/../src/Worker.php';
+
+use Autotest\PhpStanExtractor\Worker;
+
+$worker = new Worker();
+
+while (($line = fgets(STDIN)) !== false) {
+    $line = trim($line);
+    if ($line === '') continue;
+
+    $req = json_decode($line, true);
+    if (!is_array($req)) {
+        echo json_encode([
+            'jsonrpc' => '2.0',
+            'id' => null,
+            'error' => ['code' => -32700, 'message' => 'Parse error']
+        ]) . "\n";
+        continue;
+    }
+
+    $res = $worker->handleRequest($req);
+    echo json_encode($res, JSON_UNESCAPED_SLASHES) . "\n";
+    flush();
+}

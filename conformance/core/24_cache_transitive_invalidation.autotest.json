@@ -1,0 +1,47 @@
+{
+  "$schema": "https://autotest.dev/schema/scenario.v1.schema.json",
+  "schema_version": "1.0",
+  "source": {
+    "file": "src/Billing/DependentBillingService.php",
+    "content_hash": "sha256:0123456789abcdef0123456789abcdef",
+    "analyzer": "conformance-harness@1.0.0",
+    "dependencies": {
+      "App\\Service\\TaxRateProvider": "contract_sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90"
+    }
+  },
+  "targets": [
+    {
+      "id": "App\\Billing\\DependentBillingService::calculateFinalBill",
+      "kind": "method",
+      "signature": {
+        "parameters": [
+          {
+            "name": "amount",
+            "type": "float"
+          }
+        ],
+        "return_type": "float"
+      },
+      "scenarios": [
+        {
+          "name": "transitive_cache_scenario",
+          "mode": "symbolic_contract",
+          "locked": false,
+          "stale": false,
+          "tags": [
+            "cache",
+            "transitive_invalidation"
+          ],
+          "inputs": {
+            "amount": 100.0
+          },
+          "expected": {
+            "outcome": "return",
+            "type": "float",
+            "value": 119.0
+          }
+        }
+      ]
+    }
+  ]
+}
