@@ -93,6 +93,82 @@ final class AutotestBridgeTest extends TestCase
         )
     }
 
+    /// PHPUnit < 10 variant: uses the `@dataProvider` docblock instead of the `#[DataProvider]` attribute.
+    pub fn generate_phpunit_bridge_legacy(scenario_dir: &str) -> String {
+        Self::generate_phpunit_bridge(scenario_dir).replace(
+            "#[DataProvider('scenarioProvider')]",
+            "/**\n     * @dataProvider scenarioProvider\n     */",
+        )
+    }
+
+    /// Plain-JavaScript (CommonJS) Jest bridge for repos without TypeScript/Babel-TS support.
+    pub fn generate_jest_js_bridge(scenario_dir: &str) -> String {
+        format!(
+            r#"const fs = require('node:fs');
+const path = require('node:path');
+const {{ executeAutotestScenario }} = require('@autotest/jest');
+
+function collectScenarios(dir, fileFilter, indexFilter) {{
+  const files = [];
+  if (fileFilter) {{
+    const projectRoot = path.resolve(__dirname, '..');
+    const candidates = [fileFilter, path.resolve(projectRoot, fileFilter), path.resolve(dir, fileFilter)];
+    const found = candidates.find(c => fs.existsSync(c) && fs.statSync(c).isFile());
+    if (!found) {{
+      throw new Error(`AUTOTEST_FILE not found: ${{fileFilter}}`);
+    }}
+    files.push(found);
+  }} else if (fs.existsSync(dir)) {{
+    function walk(current) {{
+      for (const entry of fs.readdirSync(current, {{ withFileTypes: true }})) {{
+        const full = path.join(current, entry.name);
+        if (entry.isDirectory()) {{
+          walk(full);
+        }} else if (entry.isFile() && entry.name.endsWith('.autotest.json') && !entry.name.endsWith('.staging.json')) {{
+          files.push(full);
+        }}
+      }}
+    }}
+    walk(dir);
+    files.sort();
+  }}
+
+  const results = [];
+  let currentIndex = 0;
+  for (const full of files) {{
+    const content = JSON.parse(fs.readFileSync(full, 'utf-8'));
+    for (const target of content.targets || []) {{
+      for (const scenario of target.scenarios || []) {{
+        if (indexFilter === undefined || currentIndex === indexFilter) {{
+          results.push([`[#${{currentIndex}}] ${{target.id}} :: ${{scenario.name}}`, {{ ...scenario, $target_id: target.id }}, full]);
+        }}
+        currentIndex++;
+      }}
+    }}
+  }}
+  return results;
+}}
+
+const scenarioDir = path.resolve(__dirname, '../{scenario_dir}');
+const fileFilter = process.env.AUTOTEST_FILE || undefined;
+const indexFilter = process.env.AUTOTEST_INDEX !== undefined && process.env.AUTOTEST_INDEX !== ''
+  ? Number.parseInt(process.env.AUTOTEST_INDEX, 10)
+  : undefined;
+const scenarios = collectScenarios(scenarioDir, fileFilter, Number.isNaN(indexFilter) ? undefined : indexFilter);
+
+describe('Autotest Scenarios', () => {{
+  it.each(scenarios)('%s', async (_name, scenario, file) => {{
+    await executeAutotestScenario(file, scenario, {{
+      expect,
+      loadModule: (p) => Promise.resolve(require(p)),
+    }});
+  }});
+}});
+"#,
+            scenario_dir = scenario_dir.trim_start_matches('/')
+        )
+    }
+
     /// Generates TypeScript / Vitest / Jest test bridge with test.each
     /// Supports targeted execution via AUTOTEST_FILE and optional AUTOTEST_INDEX env vars.
     pub fn generate_ts_bridge(scenario_dir: &str, is_vitest: bool) -> String {

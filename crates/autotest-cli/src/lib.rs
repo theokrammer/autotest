@@ -241,7 +241,14 @@ pub fn handle_init(dir: &Path, vendor: bool) -> anyhow::Result<()> {
                     ts_cfg.bridge_file = detect_ts_bridge_file(dir);
                 } else if pkg_str.contains("\"jest\"") {
                     ts_cfg.test_framework = "jest".to_string();
-                    ts_cfg.bridge_file = detect_ts_bridge_file(dir);
+                    let uses_ts = pkg_str.contains("\"typescript\"") || pkg_str.contains("ts-jest");
+                    ts_cfg.bridge_file = if uses_ts {
+                        detect_ts_bridge_file(dir)
+                    } else if dir.join("test").is_dir() && !dir.join("tests").is_dir() {
+                        "test/autotest.bridge.test.js".to_string()
+                    } else {
+                        "tests/autotest.bridge.test.js".to_string()
+                    };
                 } else {
                     ts_cfg.test_framework = "node".to_string();
                     ts_cfg.bridge_file = "tests/autotest.bridge.test.mjs".to_string();
@@ -305,7 +312,7 @@ pub fn handle_sync_tests(dir: &Path) -> anyhow::Result<()> {
 
     if should_run_language(dir, "php") {
         if let Some(php_cfg) = config.languages.get("php") {
-            let bridge_code = EntrypointScaffolder::generate_phpunit_bridge(&config.project.scenario_dir);
+            let bridge_code = bridge_code_for(dir, "php", php_cfg, &config.project.scenario_dir);
             let bridge_path = dir.join(&php_cfg.bridge_file);
             if let Some(parent) = bridge_path.parent() {
                 fs::create_dir_all(parent)?;
@@ -317,12 +324,7 @@ pub fn handle_sync_tests(dir: &Path) -> anyhow::Result<()> {
 
     if should_run_language(dir, "typescript") {
         if let Some(ts_cfg) = config.languages.get("typescript") {
-            let fw = ts_cfg.test_framework.to_lowercase();
-            let bridge_code = if fw == "node" {
-                EntrypointScaffolder::generate_node_bridge(&config.project.scenario_dir)
-            } else {
-                EntrypointScaffolder::generate_ts_bridge(&config.project.scenario_dir, fw == "vitest")
-            };
+            let bridge_code = bridge_code_for(dir, "typescript", ts_cfg, &config.project.scenario_dir);
             let bridge_path = dir.join(&ts_cfg.bridge_file);
             if let Some(parent) = bridge_path.parent() {
                 fs::create_dir_all(parent)?;
@@ -333,6 +335,40 @@ pub fn handle_sync_tests(dir: &Path) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Detects the installed PHPUnit major version from `vendor/composer/installed.json`.
+fn detect_phpunit_major(dir: &Path) -> Option<u32> {
+    let raw = fs::read_to_string(dir.join("vendor/composer/installed.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let pkgs = v.get("packages").and_then(|p| p.as_array()).or_else(|| v.as_array())?;
+    for p in pkgs {
+        if p.get("name").and_then(|n| n.as_str()) == Some("phpunit/phpunit") {
+            let ver = p.get("version").and_then(|n| n.as_str())?;
+            return ver.trim_start_matches('v').split('.').next()?.parse().ok();
+        }
+    }
+    None
+}
+
+/// Picks the right bridge template for the language / runner / installed runner version.
+fn bridge_code_for(dir: &Path, lang_name: &str, lang_cfg: &config::LanguageConfig, scenario_dir: &str) -> String {
+    if lang_name == "typescript" || lang_name == "javascript" {
+        let fw = lang_cfg.test_framework.to_lowercase();
+        if fw == "node" {
+            EntrypointScaffolder::generate_node_bridge(scenario_dir)
+        } else if fw == "jest"
+            && (lang_cfg.bridge_file.ends_with(".js") || lang_cfg.bridge_file.ends_with(".cjs"))
+        {
+            EntrypointScaffolder::generate_jest_js_bridge(scenario_dir)
+        } else {
+            EntrypointScaffolder::generate_ts_bridge(scenario_dir, fw == "vitest")
+        }
+    } else if detect_phpunit_major(dir).map(|m| m < 10).unwrap_or(false) {
+        EntrypointScaffolder::generate_phpunit_bridge_legacy(scenario_dir)
+    } else {
+        EntrypointScaffolder::generate_phpunit_bridge(scenario_dir)
+    }
 }
 
 fn classify_empty_source(content: &str, is_php: bool) -> &'static str {
@@ -383,6 +419,10 @@ pub fn matches_scope_pattern(rel_path: &str, pattern: &str) -> bool {
         return false;
     }
     if !norm_pat.contains('*') && !norm_pat.contains('?') {
+        if !norm_pat.contains('/') {
+            // bare name: matches any path segment (dir or file name), e.g. "test.ts" or "Tests"
+            return norm_path.split('/').any(|seg| seg == norm_pat);
+        }
         return norm_path == norm_pat || norm_path.starts_with(&format!("{}/", norm_pat));
     }
     let mut rx = String::from("^");
@@ -643,7 +683,11 @@ pub fn handle_generate_with_options(dir: &Path, opts: GenerateOptions) -> anyhow
                 total_source_files += 1;
                 project_index.index_document(&extracted_doc);
 
-                let scenario_filename = if root == "." || root.starts_with("packages/") {
+                let scenario_filename = if root == "."
+                    || root.starts_with("packages/")
+                    || root.starts_with("pkgs/")
+                    || roots_to_scan.len() > 1
+                {
                     format!("{}.autotest.json", rel_path.with_extension("").display())
                 } else {
                     let rel_from_root = path.strip_prefix(&root_path).unwrap_or(rel_path);
@@ -788,7 +832,7 @@ pub fn handle_generate_with_options(dir: &Path, opts: GenerateOptions) -> anyhow
 }
 
 fn prepare_standalone_php_runner() -> anyhow::Result<PathBuf> {
-    let runner_dir = std::env::temp_dir().join("autotest-php-runner");
+    let runner_dir = std::env::temp_dir().join(format!("autotest-php-runner-{}", std::process::id()));
     fs::create_dir_all(&runner_dir)?;
 
     let files: &[(&str, &str)] = &[
@@ -912,7 +956,7 @@ fn has_scenarios_for_language(scenario_dir: &Path, lang_name: &str) -> bool {
 }
 
 fn prepare_embedded_js_hydrator() -> anyhow::Result<PathBuf> {
-    let hydrator_dir = std::env::temp_dir().join("autotest-js-hydrator");
+    let hydrator_dir = std::env::temp_dir().join(format!("autotest-js-hydrator-{}", std::process::id()));
     fs::create_dir_all(&hydrator_dir)?;
 
     let files: &[(&str, &str)] = &[
@@ -933,7 +977,7 @@ fn prepare_embedded_js_hydrator() -> anyhow::Result<PathBuf> {
 }
 
 fn prepare_vitest_bridge_config(dir: &Path, bridge_file: &str) -> anyhow::Result<PathBuf> {
-    let config_path = std::env::temp_dir().join("autotest.vitest.config.mjs");
+    let config_path = std::env::temp_dir().join(format!("autotest.vitest.{}.config.mjs", std::process::id()));
     let escaped_bridge = serde_json::to_string(bridge_file)?;
 
     // Ensure @autotest/jest resolves even if not installed (or broken symlink) in target node_modules
@@ -978,6 +1022,8 @@ export default async (env) => {{
   const mergedAlias = Array.isArray(baseAlias)
     ? [...baseAlias{array_alias}]
     : {{ ...baseAlias, {alias_entry} }};
+  // Vitest ignores root-level `include` when `projects`/`workspace` is set: drop them so the bridge is discovered.
+  const {{ projects: _projects, workspace: _workspace, ...restTest }} = baseTest;
   return {{
     ...base,
     resolve: {{
@@ -985,8 +1031,9 @@ export default async (env) => {{
       alias: mergedAlias,
     }},
     test: {{
-      ...baseTest,
+      ...restTest,
       include: Array.from(new Set([...existingInclude, {escaped_bridge}])),
+      typecheck: {{ ...(baseTest.typecheck || {{}}), enabled: false }},
     }},
   }};
 }};
@@ -1020,7 +1067,7 @@ pub fn handle_record_execution(dir: &Path, config: &AutotestConfig) -> anyhow::R
     println!("\nRecording execution outcomes in OS sandbox...");
     let sandbox_runner = autotest_sandbox::SandboxRunner::new(autotest_sandbox::SandboxConfig {
         mode: config.sandbox.mode.clone(),
-        timeout_ms: config.sandbox.timeout_ms,
+        timeout_ms: config.sandbox.timeout_ms.max(60_000),
         block_network: config.sandbox.block_network,
         allow_temp_fs_only: config.sandbox.allow_temp_fs_only,
     });
@@ -1041,16 +1088,7 @@ pub fn handle_record_execution(dir: &Path, config: &AutotestConfig) -> anyhow::R
         // Ensure bridge file exists
         if !bridge_path.exists() {
             println!("Generating missing test bridge for {}: {}", lang_name, lang_cfg.bridge_file);
-            let bridge_code = if lang_name == "typescript" || lang_name == "javascript" {
-                let fw = lang_cfg.test_framework.to_lowercase();
-                if fw == "node" {
-                    EntrypointScaffolder::generate_node_bridge(&config.project.scenario_dir)
-                } else {
-                    EntrypointScaffolder::generate_ts_bridge(&config.project.scenario_dir, fw == "vitest")
-                }
-            } else {
-                EntrypointScaffolder::generate_phpunit_bridge(&config.project.scenario_dir)
-            };
+            let bridge_code = bridge_code_for(dir, lang_name, lang_cfg, &config.project.scenario_dir);
             if let Some(parent) = bridge_path.parent() {
                 fs::create_dir_all(parent)?;
             }

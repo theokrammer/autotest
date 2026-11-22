@@ -95,7 +95,7 @@ fn collect_uncovered_lines(dir: &Path, config: &AutotestConfig) -> anyhow::Resul
                 if !local_phpunit.exists() || !php_has_coverage_driver() {
                     continue;
                 }
-                let clover_path = std::env::temp_dir().join("autotest_clover.xml");
+                let clover_path = std::env::temp_dir().join(format!("autotest_clover_{}.xml", std::process::id()));
                 let _ = fs::remove_file(&clover_path);
                 let out = Command::new(&local_phpunit)
                     .arg("--coverage-clover")
@@ -126,12 +126,34 @@ fn collect_uncovered_lines(dir: &Path, config: &AutotestConfig) -> anyhow::Resul
                         let lcov = String::from_utf8_lossy(&res.stdout);
                         parse_lcov_uncovered(dir, &lcov, &mut uncovered);
                     }
+                } else if fw == "jest" {
+                    let local_jest = dir.join("node_modules/.bin/jest");
+                    if !local_jest.exists() {
+                        continue;
+                    }
+                    let cov_dir = std::env::temp_dir().join(format!("autotest-jest-cov-{}", std::process::id()));
+                    let _ = fs::remove_dir_all(&cov_dir);
+                    let _ = Command::new(&local_jest)
+                        .arg("--coverage")
+                        .arg("--coverageReporters=json")
+                        .arg(format!("--coverageDirectory={}", cov_dir.display()))
+                        .arg("--testMatch")
+                        .arg(format!("<rootDir>/{}", lang_cfg.bridge_file.trim_start_matches('/')))
+                        .arg("--runTestsByPath")
+                        .arg(&lang_cfg.bridge_file)
+                        .current_dir(dir)
+                        .output();
+                    let cov_json = cov_dir.join("coverage-final.json");
+                    if let Ok(raw) = fs::read_to_string(&cov_json) {
+                        parse_istanbul_uncovered(dir, &raw, &mut uncovered);
+                    }
+                    let _ = fs::remove_dir_all(&cov_dir);
                 } else if fw == "vitest" {
                     let local_vitest = dir.join("node_modules/.bin/vitest");
                     if !local_vitest.exists() {
                         continue;
                     }
-                    let cov_dir = std::env::temp_dir().join("autotest-vitest-cov");
+                    let cov_dir = std::env::temp_dir().join(format!("autotest-vitest-cov-{}", std::process::id()));
                     let _ = fs::remove_dir_all(&cov_dir);
                     fs::create_dir_all(&cov_dir)?;
                     if let Ok(cfg_path) = prepare_vitest_coverage_config(dir, &lang_cfg.bridge_file, &cov_dir) {
@@ -169,7 +191,7 @@ fn php_has_coverage_driver() -> bool {
 }
 
 fn prepare_vitest_coverage_config(dir: &Path, bridge_file: &str, cov_dir: &Path) -> anyhow::Result<PathBuf> {
-    let config_path = std::env::temp_dir().join("autotest.vitest.cov.config.mjs");
+    let config_path = std::env::temp_dir().join(format!("autotest.vitest.cov.{}.config.mjs", std::process::id()));
     let escaped_bridge = serde_json::to_string(bridge_file)?;
     let escaped_cov_dir = serde_json::to_string(&cov_dir.to_string_lossy().to_string())?;
 
@@ -210,11 +232,13 @@ export default async (env) => {{
   const mergedAlias = Array.isArray(baseAlias)
     ? [...baseAlias{array_alias}]
     : {{ ...baseAlias, {alias_entry} }};
+  const {{ projects: _projects, workspace: _workspace, ...restTest }} = baseTest;
   return {{
     ...base,
     resolve: {{ ...baseResolve, alias: mergedAlias }},
     test: {{
-      ...baseTest,
+      ...restTest,
+      typecheck: {{ ...(baseTest.typecheck || {{}}), enabled: false }},
       include: Array.from(new Set([...existingInclude, {escaped_bridge}])),
       coverage: {{
         ...(baseTest.coverage || {{}}),
