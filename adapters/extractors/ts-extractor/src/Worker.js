@@ -88,7 +88,7 @@ class Worker {
         for (const raw of rawParams) {
           const trimmed = raw.trim();
           if (!trimmed) continue;
-          const clean = trimmed.replace(/^(public|private|protected|readonly)\s+/, '');
+          const clean = trimmed.replace(/@\w+(?:\([^)]*\))?\s*/g, '').replace(/^(public|private|protected|readonly)\s+/, '');
           const parts = clean.split(':');
           const pName = parts[0].trim().replace(/\?$/, '');
           const pType = parts[1] ? parts[1].split('=')[0].trim() : 'any';
@@ -106,6 +106,53 @@ class Worker {
         }
       }
 
+      // Standalone function match (when outside class)
+      const fnMatch = !currentClass && (
+        line.match(/(?:export\s+(?:default\s+)?)?(?:async\s+)?function(?:\s+(\w+))?\s*\(([^)]*)\)\s*(?::\s*([^\{]+))?\s*\{/)
+        || line.match(/(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:\(([^)]*)\)|(\w+))\s*(?::\s*([^=>\{]+))?\s*=>/)
+      );
+      if (fnMatch) {
+        const fnName = fnMatch[1] || 'default';
+        if (!['if', 'for', 'while', 'switch', 'catch'].includes(fnName)) {
+          const rawParams = (fnMatch[2] !== undefined ? fnMatch[2] : (fnMatch[4] || '')).split(',');
+          const params = [];
+          for (const raw of rawParams) {
+            const trimmed = raw.trim();
+            if (!trimmed) continue;
+            const clean = trimmed.replace(/@\w+(?:\([^)]*\))?\s*/g, '').replace(/^(public|private|protected|readonly)\s+/, '');
+            const parts = clean.split(':');
+            const pName = parts[0].trim().replace(/\?$/, '');
+            const pType = parts[1] ? parts[1].split('=')[0].trim() : 'any';
+            params.push({
+              name: pName,
+              param_type: pType,
+              constraints: pType === 'number' ? ['finite'] : (pType === 'string' ? ['non-empty'] : []),
+              default_value: null
+            });
+          }
+          const returnType = fnMatch[3] ? fnMatch[3].trim() : (fnMatch[5] ? fnMatch[5].trim() : null);
+          const sideEffects = [];
+          if (source.includes('process.exit')) {
+            sideEffects.push({
+              effect_type: 'unmockable_side_effect',
+              target: 'process.exit',
+              mockable: false
+            });
+          }
+          targets.push({
+            id: fnName,
+            kind: 'function',
+            signature: {
+              constructor_args: [],
+              parameters: params,
+              return_type: returnType
+            },
+            detected_side_effects: sideEffects,
+            scenarios: []
+          });
+        }
+      }
+
       // Method match
       const methodMatch = line.match(/(?:public\s+|static\s+|async\s+)*(\w+)\s*\(([^)]*)\)\s*(?::\s*([^\{]+))?\s*\{/);
       if (methodMatch && currentClass) {
@@ -117,7 +164,8 @@ class Worker {
           for (const raw of rawParams) {
             const trimmed = raw.trim();
             if (!trimmed) continue;
-            const parts = trimmed.split(':');
+            const clean = trimmed.replace(/@\w+(?:\([^)]*\))?\s*/g, '').replace(/^(public|private|protected|readonly)\s+/, '');
+            const parts = clean.split(':');
             const pName = parts[0].trim().replace(/\?$/, '');
             const pType = parts[1] ? parts[1].split('=')[0].trim() : 'any';
             params.push({

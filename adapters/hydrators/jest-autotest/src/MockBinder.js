@@ -19,7 +19,7 @@ class MockBinder {
 
     for (const spec of mockSpecs) {
       const target = spec.target || '';
-      const parts = target.split('.');
+      const parts = target.includes('::') ? target.split('::') : target.split('.');
       const methodName = parts[parts.length - 1];
 
       const whenArgs = spec.when_args || [];
@@ -37,6 +37,16 @@ class MockBinder {
         for (let i = 0; i < whenArgs.length; i++) {
           if (actualArgs[i] !== undefined) {
             this._assertArgMatch(whenArgs[i], actualArgs[i]);
+          }
+        }
+
+        // Apply mutate_args if configured
+        if (spec.mutate_args) {
+          for (const [idxStr, mutation] of Object.entries(spec.mutate_args)) {
+            const idx = parseInt(idxStr, 10);
+            if (actualArgs[idx] && typeof actualArgs[idx] === 'object' && typeof mutation === 'object') {
+              Object.assign(actualArgs[idx], mutation);
+            }
           }
         }
 
@@ -59,8 +69,15 @@ class MockBinder {
           return Promise.reject(new ErrorClass(retSpec.reject.message || ''));
         }
 
-        // Handle value returns
-        const value = retSpec && retSpec.value !== undefined ? retSpec.value : retSpec;
+        // Handle value returns (supports both schema v1 'return' and legacy 'value')
+        let value;
+        if (retSpec && retSpec.return !== undefined) {
+          value = retSpec.return;
+        } else if (retSpec && retSpec.value !== undefined) {
+          value = retSpec.value;
+        } else {
+          value = retSpec;
+        }
         return this.dtoHydrator.hydrate(value, classRegistry);
       };
 
@@ -126,6 +143,28 @@ class MockBinder {
         case 'regex':
           if (!new RegExp(matcher.pattern).test(actual)) {
             throw new Error(`Expected to match /${matcher.pattern}/, got ${actual}`);
+          }
+          return;
+        case 'exact':
+          if (actual !== matcher.value) {
+            throw new Error(`Exact match failed: expected ${JSON.stringify(matcher.value)}, got ${JSON.stringify(actual)}`);
+          }
+          return;
+        case 'range':
+          const min = matcher.min !== undefined ? matcher.min : -Infinity;
+          const max = matcher.max !== undefined ? matcher.max : Infinity;
+          if (actual < min || actual > max) {
+            throw new Error(`Range mismatch: ${actual} not in [${min}, ${max}]`);
+          }
+          return;
+        case 'subset':
+          if (!actual || typeof actual !== 'object') {
+            throw new Error(`Subset mismatch: actual is not an object`);
+          }
+          for (const [k, v] of Object.entries(matcher.subset || {})) {
+            if (!(k in actual) || actual[k] !== v) {
+              throw new Error(`Subset mismatch on key "${k}": expected ${JSON.stringify(v)}, got ${JSON.stringify(actual[k])}`);
+            }
           }
           return;
         default:

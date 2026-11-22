@@ -24,18 +24,33 @@ class TargetInvoker {
       throw new Error(`Target class not found in registry: ${className}`);
     }
 
-    const inputs = (scenarioSpec.inputs || []).map(input =>
-      this.dtoHydrator.hydrate(input, classRegistry)
-    );
+    const rawInputs = scenarioSpec.inputs;
+    let inputs = [];
+    if (Array.isArray(rawInputs)) {
+      inputs = rawInputs.map(input => this.dtoHydrator.hydrate(input, classRegistry));
+    } else if (rawInputs && typeof rawInputs === 'object') {
+      const params = targetDef.signature?.parameters || [];
+      inputs = params.map(param => {
+        if (param.name in rawInputs) {
+          return this.dtoHydrator.hydrate(rawInputs[param.name], classRegistry);
+        }
+        if (param.default_value !== null && param.default_value !== undefined) {
+          return this.dtoHydrator.hydrate(param.default_value, classRegistry);
+        }
+        return undefined;
+      });
+    }
 
     try {
       let result;
       if (targetDef.kind === 'function') {
-        // Static method
-        if (typeof TargetClass[methodName] !== 'function') {
-          throw new Error(`Static method ${className}.${methodName} not found`);
+        if (methodName && typeof TargetClass[methodName] === 'function') {
+          result = TargetClass[methodName](...inputs);
+        } else if (typeof TargetClass === 'function') {
+          result = TargetClass(...inputs);
+        } else {
+          throw new Error(`Function or static method ${targetId} not found in registry`);
         }
-        result = TargetClass[methodName](...inputs);
       } else {
         // Instance method - construct with mocks
         const ctorArgs = (targetDef.signature.constructor_args || []).map(param => {

@@ -13,33 +13,46 @@ class OutcomeAsserter {
    * @param {function} expect - Jest/Vitest expect function
    */
   assert(outcome, expected, classRegistry, expect) {
+    const isExceptionOutcome = expected.outcome === 'exception' || Boolean(expected.exception);
+
     // Expect an exception
-    if (expected.exception) {
+    if (isExceptionOutcome) {
+      const expectedType = expected.exception_type || (expected.exception && expected.exception.type);
+      const expectedMsg = expected.message_contains || (expected.exception && expected.exception.message);
+
       if (!outcome.error) {
         throw new Error(
-          `Expected exception ${expected.exception.type || 'Error'} but no error was thrown`
+          `Expected exception ${expectedType || 'Error'} but no error was thrown`
         );
       }
       const error = outcome.error;
 
-      if (expected.exception.type) {
-        const ExpectedClass = classRegistry[expected.exception.type] || Error;
+      if (expectedType) {
+        const ExpectedClass = classRegistry[expectedType] || Error;
         if (expect) {
           expect(error).toBeInstanceOf(ExpectedClass);
-        } else if (!(error instanceof ExpectedClass)) {
+        } else if (!(error instanceof ExpectedClass) && error.name !== expectedType && error.constructor.name !== expectedType) {
           throw new Error(
-            `Expected error type ${expected.exception.type}, got ${error.constructor.name}`
+            `Expected error type ${expectedType}, got ${error.constructor.name}`
           );
         }
       }
-      if (expected.exception.message) {
+      if (expectedMsg) {
         if (expect) {
-          expect(error.message).toContain(expected.exception.message);
-        } else if (!error.message.includes(expected.exception.message)) {
+          expect(error.message).toContain(expectedMsg);
+        } else if (!error.message.includes(expectedMsg)) {
           throw new Error(
-            `Expected error message containing "${expected.exception.message}", got "${error.message}"`
+            `Expected error message containing "${expectedMsg}", got "${error.message}"`
           );
         }
+      }
+      return;
+    }
+
+    // No crash expected
+    if (expected.outcome === 'no_crash') {
+      if (outcome.error) {
+        throw new Error(`Expected no_crash, but caught error: ${outcome.error.message || outcome.error}`);
       }
       return;
     }
