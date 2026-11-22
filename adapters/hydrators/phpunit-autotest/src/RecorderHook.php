@@ -23,14 +23,22 @@ final class RecorderHook
         ];
     }
 
-    private function serializeValue(mixed $val): mixed
+    private function serializeValue(mixed $val, int $depth = 0): mixed
     {
         if (is_scalar($val) || $val === null) {
             return $val;
         }
 
+        if ($depth > 8) {
+            return null;
+        }
+
         if (is_array($val)) {
-            return array_map([$this, 'serializeValue'], $val);
+            $out = [];
+            foreach ($val as $k => $v) {
+                $out[$k] = $this->serializeValue($v, $depth + 1);
+            }
+            return $out;
         }
 
         if ($val instanceof \DateTimeInterface) {
@@ -40,16 +48,33 @@ final class RecorderHook
             ];
         }
 
+        if ($val instanceof \Closure) {
+            return null;
+        }
+
         if (is_object($val)) {
             $class = get_class($val);
             $props = [];
             $ref = new \ReflectionClass($val);
-            foreach ($ref->getProperties(\ReflectionProperty::IS_PUBLIC) as $prop) {
-                $props[$prop->getName()] = $this->serializeValue($prop->getValue($val));
+            while ($ref !== false) {
+                foreach ($ref->getProperties() as $prop) {
+                    if ($prop->isStatic()) {
+                        continue;
+                    }
+                    $name = $prop->getName();
+                    if (array_key_exists($name, $props)) {
+                        continue;
+                    }
+                    if (!$prop->isInitialized($val)) {
+                        continue;
+                    }
+                    $props[$name] = $this->serializeValue($prop->getValue($val), $depth + 1);
+                }
+                $ref = $ref->getParentClass();
             }
             return [
                 '$type' => $class,
-                '$props' => $props
+                '$props' => (object)$props
             ];
         }
 

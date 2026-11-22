@@ -148,6 +148,70 @@ impl PhpExtractor {
         (impl_hash, public_contract_hash)
     }
 
+    fn parse_param_def(param_str: &str) -> (String, String, Option<serde_json::Value>) {
+        let parts_eq: Vec<&str> = param_str.splitn(2, '=').collect();
+        let left = parts_eq[0].trim();
+        let default_val = if parts_eq.len() > 1 {
+            let raw_val = parts_eq[1].trim();
+            if let Ok(num) = raw_val.parse::<i64>() {
+                Some(serde_json::json!(num))
+            } else if let Ok(num) = raw_val.parse::<f64>() {
+                Some(serde_json::json!(num))
+            } else if raw_val == "true" {
+                Some(serde_json::json!(true))
+            } else if raw_val == "false" {
+                Some(serde_json::json!(false))
+            } else if raw_val == "null" {
+                Some(serde_json::Value::Null)
+            } else {
+                let unquoted = raw_val.trim_matches('\'').trim_matches('"');
+                Some(serde_json::json!(unquoted))
+            }
+        } else {
+            None
+        };
+
+        let tokens: Vec<&str> = left.split_whitespace().collect();
+        let (ptype, pname) = if tokens.len() >= 2 {
+            let name_part = tokens.last().unwrap().trim_start_matches('$').to_string();
+            let type_part = tokens[tokens.len() - 2].to_string();
+            (type_part, name_part)
+        } else if tokens.len() == 1 {
+            ("mixed".to_string(), tokens[0].trim_start_matches('$').to_string())
+        } else {
+            ("mixed".to_string(), "unknown".to_string())
+        };
+
+        (ptype, pname, default_val)
+    }
+
+    fn extract_class_body<'a>(content: &'a str, class_name: &str) -> Option<&'a str> {
+        let pattern = format!(r"(?:final\s+|readonly\s+|abstract\s+)*class\s+{}\b[^{{]*\{{", regex::escape(class_name));
+        let re = Regex::new(&pattern).ok()?;
+        let mat = re.find(content)?;
+        let start_brace = mat.end() - 1;
+
+        let mut depth = 0;
+        let mut end = start_brace;
+        for (idx, b) in content[start_brace..].bytes().enumerate() {
+            if b == b'{' {
+                depth += 1;
+            } else if b == b'}' {
+                depth -= 1;
+                if depth == 0 {
+                    end = start_brace + idx;
+                    break;
+                }
+            }
+        }
+
+        if depth == 0 && end > start_brace {
+            Some(&content[start_brace + 1..end])
+        } else {
+            None
+        }
+    }
+
     pub fn parse_php(content: &str) -> Result<Vec<PhpClassMetadata>, ExtractorError> {
         let mut classes = Vec::new();
 
@@ -170,6 +234,8 @@ impl PhpExtractor {
         let requires_fallback = content.contains("@template") || content.contains("@psalm-") || content.contains("array{");
 
         for class_name in class_names {
+            let class_content = Self::extract_class_body(content, &class_name).unwrap_or(content);
+
             let mut constructor_params = Vec::new();
             let mut static_factories = Vec::new();
             let public_properties = Vec::new();
@@ -177,42 +243,33 @@ impl PhpExtractor {
 
             // Constructor Property Promotion and Standard Constructor
             let ctor_regex = Regex::new(r"public\s+function\s+__construct\s*\(([^)]*)\)").unwrap();
-            if let Some(cap) = ctor_regex.captures(content) {
+            if let Some(cap) = ctor_regex.captures(class_content) {
                 let params_str = &cap[1];
                 for param_def in params_str.split(',') {
                     let trimmed = param_def.trim();
                     if trimmed.is_empty() {
                         continue;
                     }
-                    let parts: Vec<&str> = trimmed.split_whitespace().collect();
-                    let (param_type, param_name) = if parts.len() >= 2 {
-                        let name_part = parts.last().unwrap().trim_start_matches('$');
-                        let type_part = parts[parts.len() - 2];
-                        (type_part.to_string(), name_part.to_string())
-                    } else if parts.len() == 1 {
-                        ("mixed".to_string(), parts[0].trim_start_matches('$').to_string())
-                    } else {
-                        continue;
-                    };
+                    let (param_type, param_name, default_value) = Self::parse_param_def(trimmed);
 
                     constructor_params.push(ParameterDefinition {
                         name: param_name,
                         param_type,
                         constraints: Vec::new(),
-                        default_value: None,
+                        default_value,
                     });
                 }
             }
 
             // Static factories
             let factory_regex = Regex::new(r"public\s+static\s+function\s+([A-Za-z0-9_]+)\s*\([^)]*\)\s*:\s*(self|static|[A-Za-z0-9_\\]+)").unwrap();
-            for cap in factory_regex.captures_iter(content) {
+            for cap in factory_regex.captures_iter(class_content) {
                 static_factories.push(cap[1].to_string());
             }
 
             // Methods
             let method_regex = Regex::new(r"(public|protected|private)?\s*(static\s+)?function\s+([A-Za-z0-9_]+)\s*\(([^)]*)\)(?:\s*:\s*([A-Za-z0-9_\\]+))?").unwrap();
-            for cap in method_regex.captures_iter(content) {
+            for cap in method_regex.captures_iter(class_content) {
                 let visibility = cap.get(1).map_or("public", |m| m.as_str());
                 let is_static = cap.get(2).is_some();
                 let method_name = cap[3].to_string();
@@ -225,22 +282,25 @@ impl PhpExtractor {
                     if p_trim.is_empty() {
                         continue;
                     }
-                    let tokens: Vec<&str> = p_trim.split_whitespace().collect();
-                    let (ptype, pname) = if tokens.len() >= 2 {
-                        (tokens[tokens.len() - 2].to_string(), tokens.last().unwrap().trim_start_matches('$').to_string())
-                    } else {
-                        ("mixed".to_string(), tokens[0].trim_start_matches('$').to_string())
-                    };
+                    let (ptype, pname, pdefault) = Self::parse_param_def(p_trim);
 
                     let mut constraints = Vec::new();
                     if ptype == "float" || ptype == "int" {
                         constraints.push("finite".to_string());
-                        if content.contains(&format!("${} < 0", pname)) || content.contains(&format!("${} <= 0", pname)) {
+                        if class_content.contains(&format!("${} < 0", pname)) || class_content.contains(&format!("${} <= 0", pname)) {
                             constraints.push(">= 0.0".to_string());
                         }
                     } else if ptype == "string" {
-                        constraints.push("non-empty-string".to_string());
-                        if content.contains(&format!("strlen(${}) !== 2", pname)) || content.contains(&format!("strlen(${}) != 2", pname)) {
+                        let has_non_empty_guard = class_content.contains(&format!("empty(${})", pname))
+                            || class_content.contains(&format!("${} === ''", pname))
+                            || class_content.contains(&format!("${} === \"\"", pname))
+                            || class_content.contains(&format!("trim(${}) === ''", pname))
+                            || class_content.contains(&format!("strlen(${}) === 0", pname))
+                            || class_content.contains(&format!("non-empty-string ${}", pname));
+                        if has_non_empty_guard {
+                            constraints.push("non-empty-string".to_string());
+                        }
+                        if class_content.contains(&format!("strlen(${}) !== 2", pname)) || class_content.contains(&format!("strlen(${}) != 2", pname)) {
                             constraints.push("length == 2".to_string());
                         }
                     }
@@ -249,7 +309,7 @@ impl PhpExtractor {
                         name: pname,
                         param_type: ptype,
                         constraints,
-                        default_value: None,
+                        default_value: pdefault,
                     });
                 }
 
@@ -258,7 +318,7 @@ impl PhpExtractor {
                 for ctor_p in &constructor_params {
                     let _target_call = format!("->{}->", ctor_p.name);
                     let target_method_regex = Regex::new(&format!(r"\$this->{}->([A-Za-z0-9_]+)\(", ctor_p.name)).unwrap();
-                    for call_cap in target_method_regex.captures_iter(content) {
+                    for call_cap in target_method_regex.captures_iter(class_content) {
                         side_effects.push(DetectedSideEffect {
                             effect_type: "interface_call".to_string(),
                             target: format!("{}.{}", ctor_p.name, &call_cap[1]),
@@ -268,7 +328,7 @@ impl PhpExtractor {
                 }
 
                 // Clock reads
-                if content.contains("new \\DateTimeImmutable()") || content.contains("new DateTimeImmutable()") {
+                if class_content.contains("new \\DateTimeImmutable()") || class_content.contains("new DateTimeImmutable()") {
                     side_effects.push(DetectedSideEffect {
                         effect_type: "clock_read".to_string(),
                         target: "clock.now".to_string(),
@@ -277,7 +337,7 @@ impl PhpExtractor {
                 }
 
                 // Unmockable side effects
-                if content.contains("$_ENV") || content.contains("$_SERVER") || content.contains("exec(") || content.contains("system(") {
+                if class_content.contains("$_ENV") || class_content.contains("$_SERVER") || class_content.contains("exec(") || class_content.contains("system(") {
                     side_effects.push(DetectedSideEffect {
                         effect_type: "unmockable_side_effect".to_string(),
                         target: "global.state".to_string(),

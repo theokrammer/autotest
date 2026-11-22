@@ -48,7 +48,9 @@ final class OutcomeAsserter
                 }
 
                 $expectedClass = $expectedSpec['exception_type'] ?? 'Throwable';
-                if (!($actualException instanceof $expectedClass)) {
+                if (method_exists($testCase, 'assertInstanceOf')) {
+                    $testCase->assertInstanceOf($expectedClass, $actualException);
+                } elseif (!($actualException instanceof $expectedClass)) {
                     throw new \AssertionError(sprintf(
                         "Expected exception instance of %s, got %s",
                         $expectedClass,
@@ -58,7 +60,9 @@ final class OutcomeAsserter
 
                 if (!empty($expectedSpec['message_contains'])) {
                     $substr = $expectedSpec['message_contains'];
-                    if (!str_contains($actualException->getMessage(), $substr)) {
+                    if (method_exists($testCase, 'assertStringContainsString')) {
+                        $testCase->assertStringContainsString($substr, $actualException->getMessage());
+                    } elseif (!str_contains($actualException->getMessage(), $substr)) {
                         throw new \AssertionError(sprintf(
                             "Expected exception message to contain '%s', but got '%s'",
                             $substr,
@@ -69,7 +73,9 @@ final class OutcomeAsserter
                 break;
 
             case 'no_crash':
-                if ($actualException !== null) {
+                if (method_exists($testCase, 'assertNull')) {
+                    $testCase->assertNull($actualException);
+                } elseif ($actualException !== null) {
                     throw new \AssertionError("Expected no_crash, but caught exception: " . $actualException->getMessage());
                 }
                 break;

@@ -37,25 +37,37 @@ final class DtoHydrator
                 }
             }
 
-            // Tier 3: Constructor-First
-            if (isset($value['$ctor']) && class_exists($type)) {
-                $ctorArgs = $this->hydrateArgs($value['$ctor']);
+            // Tier 3 & 4: Constructor-First with Property-Fallback
+            if (class_exists($type)) {
                 $refClass = new \ReflectionClass($type);
-                $instance = $refClass->newInstanceArgs($ctorArgs);
+                $instance = null;
 
-                // Tier 4: Property-Fallback
-                if (!empty($value['$props']) && is_array($value['$props'])) {
-                    foreach ($value['$props'] as $propName => $propVal) {
-                        if ($refClass->hasProperty($propName)) {
-                            $prop = $refClass->getProperty($propName);
-                            if ($prop->isPublic() && !$prop->isReadOnly()) {
+                if (isset($value['$ctor'])) {
+                    $ctorArgs = $this->hydrateArgs($value['$ctor']);
+                    $instance = $refClass->newInstanceArgs($ctorArgs);
+                } else {
+                    $instance = $refClass->newInstanceWithoutConstructor();
+                }
+
+                if ($instance !== null) {
+                    if (isset($value['$props']) && is_array($value['$props'])) {
+                        foreach ($value['$props'] as $propName => $propVal) {
+                            $prop = null;
+                            $currentRef = $refClass;
+                            while ($currentRef !== false) {
+                                if ($currentRef->hasProperty($propName)) {
+                                    $prop = $currentRef->getProperty($propName);
+                                    break;
+                                }
+                                $currentRef = $currentRef->getParentClass();
+                            }
+                            if ($prop !== null && !$prop->isStatic()) {
                                 $prop->setValue($instance, $this->hydrate($propVal));
                             }
                         }
                     }
+                    return $instance;
                 }
-
-                return $instance;
             }
         }
 
