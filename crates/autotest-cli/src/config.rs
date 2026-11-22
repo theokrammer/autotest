@@ -35,6 +35,10 @@ pub struct LanguageConfig {
     pub fallback_extractor: Option<String>,
     pub test_framework: String,
     pub bridge_file: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +61,8 @@ impl Default for AutotestConfig {
                 fallback_extractor: Some("php:phpstan".to_string()),
                 test_framework: "phpunit".to_string(),
                 bridge_file: "tests/AutotestBridgeTest.php".to_string(),
+                include_paths: Vec::new(),
+                exclude_paths: Vec::new(),
             },
         );
         languages.insert(
@@ -68,6 +74,8 @@ impl Default for AutotestConfig {
                 fallback_extractor: None,
                 test_framework: "vitest".to_string(),
                 bridge_file: "tests/autotest.bridge.test.ts".to_string(),
+                include_paths: Vec::new(),
+                exclude_paths: Vec::new(),
             },
         );
 

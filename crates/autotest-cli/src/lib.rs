@@ -1,12 +1,13 @@
 pub mod config;
+pub mod coverage_feedback;
 
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use autotest_core::{
-    EntrypointScaffolder, FixtureDeduplicator, MergeMode, ScenarioDocument, ScenarioMerger,
-    SolverConfig, SymbolicSolver,
+    EntrypointScaffolder, FixtureDeduplicator, MergeMode, ProjectIndex, ScenarioDocument,
+    ScenarioMerger, SolverConfig, SymbolicSolver,
 };
 pub use config::AutotestConfig;
 
@@ -39,11 +40,29 @@ pub enum Commands {
         /// Non-interactive mode for CI/CD pipelines
         #[arg(long)]
         non_interactive: bool,
+        /// Restrict generation to matching path prefixes or globs
+        #[arg(long)]
+        include: Vec<String>,
+        /// Exclude files matching path prefixes or globs
+        #[arg(long)]
+        exclude: Vec<String>,
+        /// Run iterative coverage-guided scenario synthesis after recording
+        #[arg(long)]
+        coverage_guided: bool,
+        /// Maximum coverage-guided feedback iterations
+        #[arg(long, default_value_t = 2)]
+        max_iterations: usize,
     },
     /// Shortcut to record outcomes in OS sandbox
     Record {
         #[arg(long)]
         non_interactive: bool,
+        /// Run iterative coverage-guided scenario synthesis after recording
+        #[arg(long)]
+        coverage_guided: bool,
+        /// Maximum coverage-guided feedback iterations
+        #[arg(long, default_value_t = 2)]
+        max_iterations: usize,
     },
     /// Generate native test runner bridge files
     SyncTests,
@@ -69,11 +88,43 @@ pub fn run_cli(cli: Cli) -> anyhow::Result<()> {
             force_all,
             record,
             non_interactive,
+            include,
+            exclude,
+            coverage_guided,
+            max_iterations,
         } => {
-            handle_generate(&current_dir, force, force_all, record, non_interactive)?;
+            handle_generate_with_options(
+                &current_dir,
+                GenerateOptions {
+                    force,
+                    force_all,
+                    record: record || coverage_guided,
+                    non_interactive,
+                    include,
+                    exclude,
+                    coverage_guided,
+                    max_iterations,
+                },
+            )?;
         }
-        Commands::Record { non_interactive } => {
-            handle_generate(&current_dir, false, false, true, non_interactive)?;
+        Commands::Record {
+            non_interactive,
+            coverage_guided,
+            max_iterations,
+        } => {
+            handle_generate_with_options(
+                &current_dir,
+                GenerateOptions {
+                    force: false,
+                    force_all: false,
+                    record: true,
+                    non_interactive,
+                    include: Vec::new(),
+                    exclude: Vec::new(),
+                    coverage_guided,
+                    max_iterations,
+                },
+            )?;
         }
         Commands::SyncTests => {
             handle_sync_tests(&current_dir)?;
@@ -313,20 +364,85 @@ fn classify_empty_source(content: &str, is_php: bool) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct GenerateOptions {
+    pub force: bool,
+    pub force_all: bool,
+    pub record: bool,
+    pub non_interactive: bool,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+    pub coverage_guided: bool,
+    pub max_iterations: usize,
+}
+
+pub fn matches_scope_pattern(rel_path: &str, pattern: &str) -> bool {
+    let norm_path = rel_path.replace('\\', "/");
+    let norm_pat = pattern.trim().trim_start_matches("./").trim_end_matches('/');
+    if norm_pat.is_empty() {
+        return false;
+    }
+    if !norm_pat.contains('*') && !norm_pat.contains('?') {
+        return norm_path == norm_pat || norm_path.starts_with(&format!("{}/", norm_pat));
+    }
+    let mut rx = String::from("^");
+    let chars: Vec<char> = norm_pat.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        match chars[i] {
+            '*' => {
+                if i + 1 < chars.len() && chars[i + 1] == '*' {
+                    rx.push_str(".*");
+                    i += 2;
+                    if i < chars.len() && chars[i] == '/' {
+                        i += 1;
+                    }
+                } else {
+                    rx.push_str("[^/]*");
+                    i += 1;
+                }
+            }
+            '?' => {
+                rx.push_str("[^/]");
+                i += 1;
+            }
+            c => {
+                rx.push_str(&regex::escape(&c.to_string()));
+                i += 1;
+            }
+        }
+    }
+    rx.push('$');
+    regex::Regex::new(&rx).map(|r| r.is_match(&norm_path)).unwrap_or(false)
+}
+
 pub fn handle_generate(
     dir: &Path,
     force: bool,
     force_all: bool,
     record: bool,
-    _non_interactive: bool,
+    non_interactive: bool,
 ) -> anyhow::Result<()> {
+    handle_generate_with_options(
+        dir,
+        GenerateOptions {
+            force,
+            force_all,
+            record,
+            non_interactive,
+            ..Default::default()
+        },
+    )
+}
+
+pub fn handle_generate_with_options(dir: &Path, opts: GenerateOptions) -> anyhow::Result<()> {
     let config = AutotestConfig::load_from_dir(dir)?;
     let scenario_dir = dir.join(&config.project.scenario_dir);
     fs::create_dir_all(&scenario_dir)?;
 
-    let mode = if force_all {
+    let mode = if opts.force_all {
         MergeMode::ForceAll
-    } else if force {
+    } else if opts.force {
         MergeMode::Force
     } else {
         MergeMode::NonDestructive
@@ -348,7 +464,10 @@ pub fn handle_generate(
         max_loop_unroll: config.solver.max_loop_unroll,
     });
 
-    // 1. Scan configured source roots for each language and extract targets
+    let mut project_index = ProjectIndex::new();
+    let mut pending_docs: Vec<(PathBuf, ScenarioDocument)> = Vec::new();
+
+    // Pass 1: Scan configured source roots, index metadata/interfaces/classes, and extract targets
     for (lang_name, lang_cfg) in &config.languages {
         if !should_run_language(dir, lang_name) {
             continue;
@@ -370,6 +489,14 @@ pub fn handle_generate(
                 );
             }
         }
+
+        let effective_includes: Vec<String> = if !opts.include.is_empty() {
+            opts.include.clone()
+        } else {
+            lang_cfg.include_paths.clone()
+        };
+        let mut effective_excludes = lang_cfg.exclude_paths.clone();
+        effective_excludes.extend(opts.exclude.iter().cloned());
 
         for root in &roots_to_scan {
             let root_path = dir.join(root);
@@ -440,8 +567,6 @@ pub fn handle_generate(
                     continue;
                 }
 
-                total_scanned_files += 1;
-
                 let content = match fs::read_to_string(path) {
                     Ok(c) => c,
                     Err(e) => {
@@ -453,6 +578,29 @@ pub fn handle_generate(
                         continue;
                     }
                 };
+
+                // Always index interfaces/constants even if excluded from target generation
+                project_index.index_source_metadata(&rel_path_str, &content, is_php);
+
+                // Scope filtering
+                if !effective_includes.is_empty()
+                    && !effective_includes.iter().any(|pat| matches_scope_pattern(&rel_path_str, pat))
+                {
+                    skipped_by_reason
+                        .entry("excluded by scope filter")
+                        .or_default()
+                        .push(rel_path_str.to_string());
+                    continue;
+                }
+                if effective_excludes.iter().any(|pat| matches_scope_pattern(&rel_path_str, pat)) {
+                    skipped_by_reason
+                        .entry("excluded by scope filter")
+                        .or_default()
+                        .push(rel_path_str.to_string());
+                    continue;
+                }
+
+                total_scanned_files += 1;
 
                 // Skip executable CLI scripts (shebang)
                 if content.starts_with("#!") {
@@ -471,7 +619,7 @@ pub fn handle_generate(
                         .map_err(|e| anyhow::anyhow!("{}", e))
                 };
 
-                let mut extracted_doc = match extraction_result {
+                let extracted_doc = match extraction_result {
                     Ok(doc) => doc,
                     Err(e) => {
                         tracing::warn!("Extraction error for {}: {}", rel_path_str, e);
@@ -493,9 +641,8 @@ pub fn handle_generate(
                 }
 
                 total_source_files += 1;
+                project_index.index_document(&extracted_doc);
 
-                // Determine target .autotest.json path in scenario_dir
-                // Example: src/order/OrderService.ts with root "src" -> tests/scenarios/order/OrderService.autotest.json
                 let scenario_filename = if root == "." || root.starts_with("packages/") {
                     format!("{}.autotest.json", rel_path.with_extension("").display())
                 } else {
@@ -504,44 +651,46 @@ pub fn handle_generate(
                     format!("{}.autotest.json", rel_without_ext.display())
                 };
                 let target_scenario_path = scenario_dir.join(scenario_filename);
-
-                if let Some(parent) = target_scenario_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-
-                // Check for existing scenario file
-                let existing_doc = if target_scenario_path.exists() {
-                    let existing_content = fs::read_to_string(&target_scenario_path)?;
-                    serde_json::from_str::<ScenarioDocument>(&existing_content).ok()
-                } else {
-                    None
-                };
-
-                // Solve symbolic contracts & stateful call chains for extracted targets
-                solver.solve_document(&mut extracted_doc);
-
-                if config.project.deduplicate_fixtures {
-                    FixtureDeduplicator::deduplicate(&mut extracted_doc);
-                }
-
-                let (merged, report) = ScenarioMerger::merge(existing_doc.as_ref(), &extracted_doc, mode);
-                total_added += report.added_scenarios;
-                total_locked += report.retained_locked;
-                all_stale.extend(report.stale_assertions);
-
-                let output = if config.project.canonical_sort {
-                    serde_json::to_string_pretty(&merged)?
-                } else {
-                    serde_json::to_string(&merged)?
-                };
-
-                fs::write(&target_scenario_path, output)?;
-                if let Ok(canonical) = target_scenario_path.canonicalize() {
-                    processed_scenario_files.insert(canonical);
-                } else {
-                    processed_scenario_files.insert(target_scenario_path.clone());
-                }
+                pending_docs.push((target_scenario_path, extracted_doc));
             }
+        }
+    }
+
+    // Pass 2: Solve all buffered documents with cross-file ProjectIndex
+    for (target_scenario_path, mut extracted_doc) in pending_docs {
+        if let Some(parent) = target_scenario_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let existing_doc = if target_scenario_path.exists() {
+            let existing_content = fs::read_to_string(&target_scenario_path)?;
+            serde_json::from_str::<ScenarioDocument>(&existing_content).ok()
+        } else {
+            None
+        };
+
+        solver.solve_document_with_index(&mut extracted_doc, &project_index);
+
+        if config.project.deduplicate_fixtures {
+            FixtureDeduplicator::deduplicate(&mut extracted_doc);
+        }
+
+        let (merged, report) = ScenarioMerger::merge(existing_doc.as_ref(), &extracted_doc, mode);
+        total_added += report.added_scenarios;
+        total_locked += report.retained_locked;
+        all_stale.extend(report.stale_assertions);
+
+        let output = if config.project.canonical_sort {
+            serde_json::to_string_pretty(&merged)?
+        } else {
+            serde_json::to_string(&merged)?
+        };
+
+        fs::write(&target_scenario_path, output)?;
+        if let Ok(canonical) = target_scenario_path.canonicalize() {
+            processed_scenario_files.insert(canonical);
+        } else {
+            processed_scenario_files.insert(target_scenario_path.clone());
         }
     }
 
@@ -626,8 +775,13 @@ pub fn handle_generate(
     }
 
     // 3. If record requested, run the test runners in isolated OS sandbox to record outcomes
-    if record {
+    if opts.record || opts.coverage_guided {
         handle_record_execution(dir, &config)?;
+    }
+
+    // 4. Optional coverage-guided feedback loop
+    if opts.coverage_guided {
+        coverage_feedback::run_coverage_guided_loop(dir, &config, &project_index, opts.max_iterations)?;
     }
 
     Ok(())
