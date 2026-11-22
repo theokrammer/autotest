@@ -60,12 +60,11 @@ impl SymbolicSolver {
         let target_prefix = target.id.replace("::", "_").replace('\\', "_").replace('.', "_");
 
         // Determine default static factory for private-constructor classes
+        let target_short_cls = split_class_method(&target.id)
+            .map(|(c, _)| c.rsplit('\\').next().unwrap_or(c).rsplit('.').next().unwrap_or(c))
+            .unwrap_or("");
         let default_factory = if target.signature.private_constructor && !target.signature.static_factories.is_empty() {
-            let chosen = target
-                .signature
-                .static_factories
-                .iter()
-                .find(|f| f.name == "fromSuccess" || f.name == "create" || f.name == "get")
+            let chosen = choose_best_static_factory(&target.signature.static_factories, target_short_cls)
                 .unwrap_or(&target.signature.static_factories[0]);
             let fargs: Vec<Value> = chosen
                 .parameters
@@ -646,6 +645,21 @@ impl SymbolicSolver {
         let source_file = doc.source.file.clone();
         let is_php = source_file.ends_with(".php");
 
+        // Resolve inter-procedural forwarded and lookup-table constraints before solving targets
+        for target in &mut doc.targets {
+            for p in &mut target.signature.parameters {
+                p.constraints = index.resolve_dynamic_constraints(&p.constraints, 0);
+            }
+            for p in &mut target.signature.constructor_args {
+                p.constraints = index.resolve_dynamic_constraints(&p.constraints, 0);
+            }
+            for f in &mut target.signature.static_factories {
+                for p in &mut f.parameters {
+                    p.constraints = index.resolve_dynamic_constraints(&p.constraints, 0);
+                }
+            }
+        }
+
         for target in &mut doc.targets {
             let new_scenarios = self.solve_target_with_index(target, &source_file, index);
             if !new_scenarios.is_empty() {
@@ -849,6 +863,41 @@ fn make_inline_mock(target: &str, return_value: Value) -> MockReferenceOrInline 
     })
 }
 
+fn choose_best_static_factory<'a>(
+    factories: &'a [ crate::ir::FactorySignature ],
+    class_short_name: &str,
+) -> Option<&'a crate::ir::FactorySignature> {
+    if factories.is_empty() {
+        return None;
+    }
+    let is_non_recursive = |f: &&crate::ir::FactorySignature| -> bool {
+        if class_short_name.is_empty() {
+            return true;
+        }
+        !f.parameters.iter().any(|p| {
+            let pt = p.param_type.trim();
+            pt == class_short_name || pt.ends_with(&format!("\\{}", class_short_name))
+        })
+    };
+    let priority = [
+        "fromSuccess", "of", "fromString", "new", "create", "get", "from", "fromISO", "zero", "fromFailure",
+    ];
+    for name in priority {
+        if let Some(f) = factories.iter().filter(is_non_recursive).find(|f| f.name == name) {
+            return Some(f);
+        }
+    }
+    if let Some(f) = factories.iter().find(is_non_recursive) {
+        return Some(f);
+    }
+    for name in priority {
+        if let Some(f) = factories.iter().find(|f| f.name == name) {
+            return Some(f);
+        }
+    }
+    factories.first()
+}
+
 fn build_producer_dto(
     producer: &ClassIndexEntry,
     index: &ProjectIndex,
@@ -857,13 +906,6 @@ fn build_producer_dto(
     if producer.private_constructor && producer.static_factories.is_empty() {
         return None;
     }
-    // Check if constructor args are constructible without cyclic failure
-    let ctor_args: Vec<Value> = producer
-        .constructor_params
-        .iter()
-        .map(|p| synthesize_value_for_param(p, index, true, is_php, 1))
-        .collect();
-
     let mut setup_calls = Vec::new();
     for (m_name, m_params) in producer.mutators.iter().take(3) {
         let args: Vec<Value> = m_params
@@ -876,14 +918,32 @@ fn build_producer_dto(
         }));
     }
 
-    if setup_calls.is_empty() && ctor_args.is_empty() {
-        return None;
-    }
-
-    let mut dto = json!({
-        "$type": producer.name,
-        "$ctor": ctor_args,
-    });
+    let mut dto = if producer.private_constructor {
+        let factory = choose_best_static_factory(&producer.static_factories, &producer.short_name)?;
+        let fargs: Vec<Value> = factory
+            .parameters
+            .iter()
+            .map(|p| synthesize_value_for_param(p, index, false, is_php, 1))
+            .collect();
+        json!({
+            "$type": producer.name,
+            "$factory": factory.name,
+            "$ctor": fargs,
+        })
+    } else {
+        let ctor_args: Vec<Value> = producer
+            .constructor_params
+            .iter()
+            .map(|p| synthesize_value_for_param(p, index, true, is_php, 1))
+            .collect();
+        if setup_calls.is_empty() && ctor_args.is_empty() {
+            return None;
+        }
+        json!({
+            "$type": producer.name,
+            "$ctor": ctor_args,
+        })
+    };
     if !setup_calls.is_empty() {
         dto["$setup_calls"] = Value::Array(setup_calls);
     }
@@ -950,7 +1010,8 @@ fn synthesize_value_for_param(
         }
     }
 
-    let is_variadic = param.constraints.iter().any(|c| c == "variadic");
+    let resolved_constraints = index.resolve_dynamic_constraints(&param.constraints, 0);
+    let is_variadic = resolved_constraints.iter().any(|c| c == "variadic");
     let t = param.param_type.trim();
     let t_lower = t.to_lowercase();
     let n_lower = param.name.to_lowercase();
@@ -992,22 +1053,42 @@ fn synthesize_value_for_param(
         || n_lower.contains("host");
     if alt
         && (t_lower != "any" || !has_prim_name_hint)
-        && param
-            .constraints
+        && resolved_constraints
             .iter()
             .any(|c| c.starts_with("prop:") || c.starts_with("prop_bool:") || c.starts_with("prop_arr:"))
     {
-        return synthesize_object_from_prop_constraints(&param.constraints);
+        return synthesize_object_from_prop_constraints(&resolved_constraints);
     }
 
-    // Check parameter constraints for length == 2
-    if !alt && t_lower.contains("string") && param.constraints.iter().any(|c| c.contains("length == 2") || c.contains("len == 2")) {
-        return json!("DE");
+    // Check parameter constraints for exact string length (`length == N` / `len == N`)
+    if t_lower.contains("string") || t_lower == "mixed" || t_lower == "any" {
+        for c in &resolved_constraints {
+            if let Some(num_str) = c.strip_prefix("length == ").or_else(|| c.strip_prefix("len == ")) {
+                if let Ok(len) = num_str.trim().parse::<usize>() {
+                    if len == 2 && !alt {
+                        return json!("DE");
+                    } else if len > 0 && len <= 1024 && (!alt || depth > 0) {
+                        return json!("0".repeat(len));
+                    }
+                }
+            }
+        }
+        // Valid domain samples parsed from regex guards or lookup tables (`valid:...`)
+        if !alt || depth > 0 {
+            if let Some(valid_sample) = resolved_constraints.iter().find_map(|c| c.strip_prefix("valid:")) {
+                return json!(valid_sample);
+            }
+        }
+        if depth > 0 {
+            if let Some(eq_sample) = resolved_constraints.iter().find_map(|c| c.strip_prefix("eq:")) {
+                return json!(eq_sample);
+            }
+        }
     }
-    if !alt && (t_lower.contains("float") || t_lower.contains("double")) && param.constraints.iter().any(|c| c.contains(">= 0") || c.contains("> 0")) {
+    if !alt && (t_lower.contains("float") || t_lower.contains("double")) && resolved_constraints.iter().any(|c| c.contains(">= 0") || c.contains("> 0")) {
         return json!(0.0);
     }
-    if !alt && (t_lower.contains("int") || t_lower.contains("number")) && param.constraints.iter().any(|c| c.contains(">= 0") || c.contains("> 0")) && !n_lower.contains("port") {
+    if !alt && (t_lower.contains("int") || t_lower.contains("number")) && resolved_constraints.iter().any(|c| c.contains(">= 0") || c.contains("> 0")) && !n_lower.contains("port") {
         return json!(0);
     }
 
@@ -1160,17 +1241,28 @@ fn synthesize_value_for_type(
         return json!({ "$type": "Callback", "returns": null });
     }
 
-    // Union type without array suffix (e.g. `Route|Group`, `string|null`, `string|BackedEnum`)
+    // Union type without array suffix (e.g. `Route|Group`, `string|null`, `string|BackedEnum`, `BigNumber|int|string`)
     if t.contains('|') {
         let candidates: Vec<&str> = t
             .split('|')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("null") && !s.eq_ignore_ascii_case("undefined"))
             .collect();
+        let is_known_or_primitive = |c: &str| -> bool {
+            let cl = c.to_lowercase();
+            matches!(
+                cl.as_str(),
+                "int" | "integer" | "number" | "float" | "double" | "string" | "bool" | "boolean" | "array"
+            ) || index.resolve_class(c).is_some()
+        };
         if let Some(chosen) = if alt && candidates.len() > 1 {
             candidates.get(1).copied()
         } else {
-            candidates.first().copied()
+            candidates
+                .iter()
+                .copied()
+                .find(|c| is_known_or_primitive(c))
+                .or_else(|| candidates.first().copied())
         } {
             return synthesize_value_for_type(chosen, param_name, index, alt, is_php, depth);
         }
@@ -1181,7 +1273,7 @@ fn synthesize_value_for_type(
         if cls.private_constructor && cls.static_factories.is_empty() {
             return json!({ "$type": "AutoMock", "class": cls.name });
         }
-        let mut dto = if let Some(factory) = cls.static_factories.iter().find(|f| f.name == "get" || f.name == "create" || f.name == "fromSuccess" || f.name == "fromFailure").or_else(|| cls.static_factories.first()) {
+        let mut dto = if let Some(factory) = choose_best_static_factory(&cls.static_factories, &cls.short_name) {
             let fargs: Vec<Value> = factory
                 .parameters
                 .iter()

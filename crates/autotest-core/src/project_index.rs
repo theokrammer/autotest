@@ -22,6 +22,8 @@ pub struct ProjectIndex {
     pub interface_impls: BTreeMap<String, Vec<String>>,
     pub interface_methods: BTreeMap<String, BTreeMap<String, String>>,
     pub string_constants: BTreeMap<String, String>,
+    pub lookup_table_keys: BTreeMap<String, Vec<String>>,
+    pub method_param_constraints: BTreeMap<String, Vec<Vec<String>>>,
 }
 
 impl ProjectIndex {
@@ -32,6 +34,50 @@ impl ProjectIndex {
     pub fn index_document(&mut self, doc: &ScenarioDocument) {
         let source_file = doc.source.file.clone();
         for target in &doc.targets {
+            // Index parameter constraints for inter-procedural forwarding resolution
+            let param_c: Vec<Vec<String>> = target
+                .signature
+                .parameters
+                .iter()
+                .map(|p| p.constraints.clone())
+                .collect();
+            if !param_c.is_empty() {
+                self.record_method_constraints(&target.id, &param_c);
+                if let Some((cls, m)) = split_class_method(&target.id) {
+                    let short_cls = short_name_of(cls);
+                    self.record_method_constraints(&format!("{}::{}", short_cls, m), &param_c);
+                    self.record_method_constraints(&format!("{}.{}", short_cls, m), &param_c);
+                    self.record_method_constraints(m, &param_c);
+                } else {
+                    let short_fn = short_name_of(&target.id);
+                    self.record_method_constraints(short_fn, &param_c);
+                }
+            }
+            if !target.signature.constructor_args.is_empty() {
+                let ctor_c: Vec<Vec<String>> = target
+                    .signature
+                    .constructor_args
+                    .iter()
+                    .map(|p| p.constraints.clone())
+                    .collect();
+                if let Some((cls, _)) = split_class_method(&target.id) {
+                    let short_cls = short_name_of(cls);
+                    self.record_method_constraints(&format!("{}::__construct", cls), &ctor_c);
+                    self.record_method_constraints(&format!("{}::__construct", short_cls), &ctor_c);
+                }
+            }
+            for f in &target.signature.static_factories {
+                let fc: Vec<Vec<String>> = f.parameters.iter().map(|p| p.constraints.clone()).collect();
+                if !fc.is_empty() {
+                    if let Some((cls, _)) = split_class_method(&target.id) {
+                        let short_cls = short_name_of(cls);
+                        self.record_method_constraints(&format!("{}::{}", cls, f.name), &fc);
+                        self.record_method_constraints(&format!("{}::{}", short_cls, f.name), &fc);
+                        self.record_method_constraints(&f.name, &fc);
+                    }
+                }
+            }
+
             if target.kind != TargetKind::Method && target.signature.constructor_args.is_empty() && target.signature.static_factories.is_empty() {
                 continue;
             }
@@ -93,11 +139,195 @@ impl ProjectIndex {
         }
     }
 
-    pub fn index_source_metadata(&mut self, _source_file: &str, content: &str, is_php: bool) {
+    pub fn index_source_metadata(&mut self, source_file: &str, content: &str, is_php: bool) {
+        self.index_source_metadata_with_dir(None, source_file, content, is_php);
+    }
+
+    pub fn index_source_metadata_with_dir(
+        &mut self,
+        project_dir: Option<&std::path::Path>,
+        source_file: &str,
+        content: &str,
+        is_php: bool,
+    ) {
         if is_php {
             self.index_php_interfaces(content);
+            self.index_php_lookup_tables(project_dir, source_file, content);
         } else {
             self.index_ts_constants_and_interfaces(content);
+            self.index_ts_lookup_tables(content);
+        }
+    }
+
+    fn record_method_constraints(&mut self, key: &str, params: &[Vec<String>]) {
+        let entry = self
+            .method_param_constraints
+            .entry(key.to_string())
+            .or_insert_with(|| vec![Vec::new(); params.len()]);
+        if entry.len() < params.len() {
+            entry.resize(params.len(), Vec::new());
+        }
+        for (idx, c_list) in params.iter().enumerate() {
+            for c in c_list {
+                if !entry[idx].contains(c) {
+                    entry[idx].push(c.clone());
+                }
+            }
+        }
+    }
+
+    pub fn resolve_dynamic_constraints(&self, constraints: &[String], depth: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        for c in constraints {
+            if !c.starts_with("lookup_key:") && !c.starts_with("forward:") && !out.contains(c) {
+                out.push(c.clone());
+            }
+        }
+        if depth > 3 {
+            return out;
+        }
+        for c in constraints {
+            if let Some(table) = c.strip_prefix("lookup_key:") {
+                if let Some(keys) = self.lookup_table_keys.get(table) {
+                    if let Some(first) = keys.first() {
+                        let v = format!("valid:{}", first);
+                        if !out.contains(&v) {
+                            out.push(v);
+                        }
+                    }
+                    for k in keys.iter().take(3) {
+                        let eq = format!("eq:{}", k);
+                        if !out.contains(&eq) {
+                            out.push(eq);
+                        }
+                    }
+                }
+            } else if let Some(rest) = c.strip_prefix("forward:") {
+                if let Some((callee, idx_str)) = rest.rsplit_once(':') {
+                    if let Ok(arg_idx) = idx_str.parse::<usize>() {
+                        if let Some(callee_params) = self.method_param_constraints.get(callee) {
+                            if let Some(target_c) = callee_params.get(arg_idx) {
+                                let resolved = self.resolve_dynamic_constraints(target_c, depth + 1);
+                                for rc in resolved {
+                                    if !rc.starts_with("forward:")
+                                        && !rc.starts_with("lookup_key:")
+                                        && rc != "variadic"
+                                        && !out.contains(&rc)
+                                    {
+                                        out.push(rc);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn index_php_lookup_tables(
+        &mut self,
+        project_dir: Option<&std::path::Path>,
+        source_file: &str,
+        content: &str,
+    ) {
+        let key_re = Regex::new(r#"['"]([A-Za-z0-9_./:-]{1,32})['"]\s*=>"#).unwrap();
+
+        // 1. Inline array constants / properties: const FOO = ['KEY' => ...] or $foo = ['KEY' => ...]
+        let arr_decl_re = Regex::new(
+            r"(?m)(?:const\s+([A-Za-z0-9_]+)|\$([A-Za-z0-9_]+))\s*=\s*\[([^\]]{4,4000})\]"
+        ).unwrap();
+        for cap in arr_decl_re.captures_iter(content) {
+            let name = cap
+                .get(1)
+                .or_else(|| cap.get(2))
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default();
+            let body = &cap[3];
+            let mut keys = Vec::new();
+            for k_cap in key_re.captures_iter(body) {
+                let k = k_cap[1].to_string();
+                if !keys.contains(&k) {
+                    keys.push(k);
+                    if keys.len() >= 4 {
+                        break;
+                    }
+                }
+            }
+            if !name.is_empty() && !keys.is_empty() {
+                self.lookup_table_keys.insert(name, keys);
+            }
+        }
+
+        // 2. External required data arrays: `$var = require __DIR__ . '/path.php';`
+        if let Some(root_dir) = project_dir {
+            let req_re = Regex::new(
+                r#"\$([A-Za-z0-9_]+)\s*=\s*require(?:_once)?\s+__DIR__\s*\.\s*['"]([^'"]+\.php)['"]"#
+            ).unwrap();
+            for cap in req_re.captures_iter(content) {
+                let var_name = cap[1].to_string();
+                let rel_req = cap[2].trim_start_matches('/');
+                let base_dir = root_dir
+                    .join(source_file)
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| root_dir.to_path_buf());
+                let req_path = base_dir.join(rel_req);
+                if let Ok(req_content) = std::fs::read_to_string(&req_path) {
+                    let mut keys = Vec::new();
+                    for k_cap in key_re.captures_iter(&req_content) {
+                        let k = k_cap[1].to_string();
+                        if !keys.contains(&k) {
+                            keys.push(k);
+                            if keys.len() >= 4 {
+                                break;
+                            }
+                        }
+                    }
+                    if !keys.is_empty() {
+                        self.lookup_table_keys.insert(var_name.clone(), keys.clone());
+                        // Also check if `$this->prop = $varName;` assigns it to a property
+                        let assign_re = Regex::new(&format!(
+                            r"\$this->([A-Za-z0-9_]+)\s*=\s*\${}\b",
+                            regex::escape(&var_name)
+                        ))
+                        .unwrap();
+                        for a_cap in assign_re.captures_iter(content) {
+                            self.lookup_table_keys
+                                .insert(a_cap[1].to_string(), keys.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn index_ts_lookup_tables(&mut self, content: &str) {
+        let obj_re = Regex::new(
+            r"(?m)^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z0-9_]+)(?:\s*:[^=]+)?\s*=\s*\{"
+        ).unwrap();
+        let key_re = Regex::new(r#"(?m)^\s*(?:['"]([A-Za-z0-9_./:-]{1,32})['"]|([A-Za-z_][A-Za-z0-9_]{0,31}))\s*:"#).unwrap();
+        for cap in obj_re.captures_iter(content) {
+            let name = cap[1].to_string();
+            let start = cap.get(0).unwrap().end() - 1;
+            if let Some(block) = extract_braced_block(&content[start..]) {
+                let mut keys = Vec::new();
+                for k_cap in key_re.captures_iter(&block) {
+                    if let Some(k) = k_cap.get(1).or_else(|| k_cap.get(2)) {
+                        let ks = k.as_str().to_string();
+                        if !keys.contains(&ks) {
+                            keys.push(ks);
+                            if keys.len() >= 4 {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !keys.is_empty() {
+                    self.lookup_table_keys.insert(name, keys);
+                }
+            }
         }
     }
 
@@ -388,4 +618,441 @@ fn resolve_php_type_str(raw: &str, namespace: &str, use_map: &HashMap<String, St
         })
         .collect();
     parts.join("|")
+}
+
+/// Deterministic Regex-to-Sample String Generator.
+/// Parses PCRE / JS regular expressions (including `/x` free-spacing mode, character classes,
+/// named/non-capturing groups, quantifiers, and alternations) and synthesizes a minimal matching string.
+pub fn sample_from_regex(raw_pattern: &str) -> Option<String> {
+    let trimmed = raw_pattern.trim().trim_matches('\'').trim_matches('"');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let (body, flags) = unwrap_regex_delimiters(trimmed);
+    let extended = flags.contains('x') || (body.contains('\n') && body.contains('#'));
+    let cleaned = if extended {
+        strip_extended_regex_whitespace_and_comments(body)
+    } else {
+        body.to_string()
+    };
+
+    let chars: Vec<char> = cleaned.chars().collect();
+    let mut pos = 0usize;
+    let out = gen_regex_alternation(&chars, &mut pos, false);
+    let res = out.trim().to_string();
+    if res.is_empty() || res.len() > 128 {
+        None
+    } else {
+        Some(res)
+    }
+}
+
+fn unwrap_regex_delimiters(s: &str) -> (&str, &str) {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        if matches!(first, b'/' | b'#' | b'~' | b'%') {
+            if let Some(last_idx) = s.rfind(first as char) {
+                if last_idx > 0 {
+                    let tail = &s[last_idx + 1..];
+                    if tail.chars().all(|c| c.is_ascii_alphabetic()) {
+                        return (&s[1..last_idx], tail);
+                    }
+                }
+            }
+        }
+    }
+    (s, "")
+}
+
+fn strip_extended_regex_whitespace_and_comments(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0usize;
+    let mut in_bracket = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() {
+            out.push(c);
+            out.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        if c == '[' && !in_bracket {
+            in_bracket = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == ']' && in_bracket {
+            in_bracket = false;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if !in_bracket {
+            if c == '#' {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if c.is_whitespace() {
+                i += 1;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+#[derive(Clone, Debug)]
+enum AtomKind {
+    Digit,
+    Dot,
+    Group(String),
+    Literal(String),
+}
+
+fn gen_regex_alternation(chars: &[char], pos: &mut usize, in_group: bool) -> String {
+    let mut branches = Vec::new();
+    loop {
+        let branch = gen_regex_sequence(chars, pos, in_group);
+        branches.push(branch);
+        if *pos < chars.len() && chars[*pos] == '|' {
+            *pos += 1;
+            continue;
+        }
+        break;
+    }
+    if in_group && *pos < chars.len() && chars[*pos] == ')' {
+        *pos += 1;
+    }
+    // Prefer a non-empty alphanumeric branch (e.g. `\d{4}` -> "2024" over `[+-]\d{6}`)
+    if let Some(best) = branches
+        .iter()
+        .find(|b| !b.is_empty() && b.chars().next().map(|c| c.is_ascii_alphanumeric()).unwrap_or(false))
+    {
+        return best.clone();
+    }
+    branches.into_iter().find(|b| !b.is_empty()).unwrap_or_default()
+}
+
+fn gen_regex_sequence(chars: &[char], pos: &mut usize, in_group: bool) -> String {
+    let mut out = String::new();
+    while *pos < chars.len() {
+        let c = chars[*pos];
+        if c == '|' || (in_group && c == ')') {
+            break;
+        }
+        if c == '^' || c == '$' {
+            *pos += 1;
+            continue;
+        }
+
+        // Parse one atom
+        let atom = if c == '(' {
+            *pos += 1;
+            parse_group_atom(chars, pos)
+        } else if c == '[' {
+            *pos += 1;
+            let ch = parse_char_class(chars, pos);
+            AtomKind::Literal(ch.to_string())
+        } else if c == '.' {
+            *pos += 1;
+            AtomKind::Dot
+        } else if c == '\\' {
+            *pos += 1;
+            parse_escape_atom(chars, pos)
+        } else if matches!(c, '?' | '*' | '+' | '{' | ')') {
+            *pos += 1;
+            continue;
+        } else {
+            *pos += 1;
+            AtomKind::Literal(c.to_string())
+        };
+
+        // Parse optional quantifier after atom
+        let (min_rep, is_star_or_plus) = parse_quantifier(chars, pos);
+        if min_rep == 0 {
+            match &atom {
+                AtomKind::Dot if is_star_or_plus => {
+                    // For `.*` / `.*?` inside a capture group (e.g. `(?<nss>.*?)`), emit "a" so capture is non-empty
+                    out.push('a');
+                }
+                AtomKind::Group(g) => {
+                    // Include short alphanumeric/date optional groups (e.g. `(?:[a-z0-9-]{0,30}[a-z0-9])?` -> "a" or `(?:-?(\d\d))?` -> "-01")
+                    // while skipping optional query/fragment/bracket extensions starting with `?`, `#`, `[`
+                    if !g.is_empty()
+                        && g.len() <= 6
+                        && !g.starts_with('?')
+                        && !g.starts_with('#')
+                        && !g.starts_with('[')
+                        && g.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+                    {
+                        out.push_str(g);
+                    }
+                }
+                AtomKind::Literal(s) if s == "-" && !is_star_or_plus => {
+                    out.push('-');
+                }
+                _ => {}
+            }
+        } else {
+            let count = min_rep.min(64);
+            match atom {
+                AtomKind::Digit => {
+                    // Coalesce consecutive `\d\d` into 2-digit "01"
+                    if count == 1 && *pos + 1 < chars.len() && chars[*pos] == '\\' && chars[*pos + 1] == 'd' {
+                        let next_after = *pos + 2;
+                        let has_quant = next_after < chars.len() && matches!(chars[next_after], '?' | '*' | '+' | '{');
+                        if !has_quant {
+                            *pos += 2;
+                            out.push_str("01");
+                            continue;
+                        }
+                    }
+                    match count {
+                        4 => out.push_str("2024"),
+                        2 => out.push_str("01"),
+                        3 => out.push_str("001"),
+                        _ => out.push_str(&"1".repeat(count)),
+                    }
+                }
+                AtomKind::Dot => out.push_str(&"a".repeat(count)),
+                AtomKind::Group(g) | AtomKind::Literal(g) => {
+                    out.push_str(&g.repeat(count));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn parse_group_atom(chars: &[char], pos: &mut usize) -> AtomKind {
+    if *pos < chars.len() && chars[*pos] == '?' {
+        *pos += 1;
+        if *pos >= chars.len() {
+            return AtomKind::Literal(String::new());
+        }
+        // Lookarounds: `(?=...)`, `(?!...)`, `(?<=...)`, `(?<!...)` -> consume 0 width
+        if chars[*pos] == '='
+            || chars[*pos] == '!'
+            || (*pos + 1 < chars.len() && chars[*pos] == '<' && (chars[*pos + 1] == '=' || chars[*pos + 1] == '!'))
+        {
+            let mut depth = 1usize;
+            while *pos < chars.len() && depth > 0 {
+                if chars[*pos] == '\\' {
+                    *pos += 2;
+                    continue;
+                }
+                if chars[*pos] == '(' {
+                    depth += 1;
+                } else if chars[*pos] == ')' {
+                    depth -= 1;
+                }
+                *pos += 1;
+            }
+            return AtomKind::Literal(String::new());
+        }
+        // Named groups: `(?<name>...)` or `(?P<name>...)` or `(?'name'...)`
+        if chars[*pos] == '<' || (*pos + 1 < chars.len() && chars[*pos] == 'P' && chars[*pos + 1] == '<') {
+            while *pos < chars.len() && chars[*pos] != '>' {
+                *pos += 1;
+            }
+            if *pos < chars.len() {
+                *pos += 1;
+            }
+        } else if chars[*pos] == '\'' {
+            *pos += 1;
+            while *pos < chars.len() && chars[*pos] != '\'' {
+                *pos += 1;
+            }
+            if *pos < chars.len() {
+                *pos += 1;
+            }
+        } else {
+            // Non-capturing `(?:...)` or modifier `(?i:...)` or `(?i)`
+            while *pos < chars.len() && chars[*pos] != ':' && chars[*pos] != ')' {
+                *pos += 1;
+            }
+            if *pos < chars.len() && chars[*pos] == ')' {
+                *pos += 1;
+                return AtomKind::Literal(String::new());
+            }
+            if *pos < chars.len() && chars[*pos] == ':' {
+                *pos += 1;
+            }
+        }
+    }
+    let inner = gen_regex_alternation(chars, pos, true);
+    AtomKind::Group(inner)
+}
+
+fn parse_char_class(chars: &[char], pos: &mut usize) -> char {
+    let negated = if *pos < chars.len() && chars[*pos] == '^' {
+        *pos += 1;
+        true
+    } else {
+        false
+    };
+    let start = *pos;
+    while *pos < chars.len() {
+        if chars[*pos] == '\\' && *pos + 1 < chars.len() {
+            *pos += 2;
+            continue;
+        }
+        if chars[*pos] == ']' && *pos > start {
+            break;
+        }
+        *pos += 1;
+    }
+    let slice: String = chars[start..(*pos).min(chars.len())].iter().collect();
+    if *pos < chars.len() && chars[*pos] == ']' {
+        *pos += 1;
+    }
+    if negated {
+        for cand in ['a', '1', 'x'] {
+            if !slice.contains(cand) {
+                return cand;
+            }
+        }
+        return 'a';
+    }
+    if slice.contains("a-z") || slice.contains("a-f") || slice.contains("\\w") {
+        return 'a';
+    }
+    if slice.contains("A-Z") || slice.contains("A-F") {
+        return 'A';
+    }
+    if slice.contains("0-9") || slice.contains("\\d") {
+        return '1';
+    }
+    // Check explicit numeric range like `1-8`
+    let s_chars: Vec<char> = slice.chars().collect();
+    for i in 0..s_chars.len() {
+        if i + 2 < s_chars.len() && s_chars[i + 1] == '-' && s_chars[i].is_ascii_alphanumeric() {
+            return s_chars[i];
+        }
+    }
+    s_chars
+        .into_iter()
+        .find(|c| *c != '\\' && *c != '-')
+        .unwrap_or('a')
+}
+
+fn parse_escape_atom(chars: &[char], pos: &mut usize) -> AtomKind {
+    if *pos >= chars.len() {
+        return AtomKind::Literal(String::new());
+    }
+    let c = chars[*pos];
+    *pos += 1;
+    match c {
+        'd' => AtomKind::Digit,
+        'w' | 'D' | 'S' => AtomKind::Literal("a".to_string()),
+        's' => AtomKind::Literal(" ".to_string()),
+        'A' | 'z' | 'Z' | 'b' | 'B' => AtomKind::Literal(String::new()),
+        'n' => AtomKind::Literal("\n".to_string()),
+        'r' => AtomKind::Literal("\r".to_string()),
+        't' => AtomKind::Literal("\t".to_string()),
+        'x' => {
+            if *pos + 2 <= chars.len() {
+                let hex: String = chars[*pos..*pos + 2].iter().collect();
+                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                    *pos += 2;
+                    let ch = (byte as char).is_ascii_graphic().then_some(byte as char).unwrap_or('a');
+                    return AtomKind::Literal(ch.to_string());
+                }
+            }
+            AtomKind::Literal("a".to_string())
+        }
+        other => AtomKind::Literal(other.to_string()),
+    }
+}
+
+fn parse_quantifier(chars: &[char], pos: &mut usize) -> (usize, bool) {
+    if *pos >= chars.len() {
+        return (1, false);
+    }
+    match chars[*pos] {
+        '?' => {
+            *pos += 1;
+            if *pos < chars.len() && chars[*pos] == '?' {
+                *pos += 1;
+            }
+            (0, false)
+        }
+        '*' => {
+            *pos += 1;
+            if *pos < chars.len() && chars[*pos] == '?' {
+                *pos += 1;
+            }
+            (0, true)
+        }
+        '+' => {
+            *pos += 1;
+            if *pos < chars.len() && chars[*pos] == '?' {
+                *pos += 1;
+            }
+            (1, true)
+        }
+        '{' => {
+            let start = *pos + 1;
+            let mut end = start;
+            while end < chars.len() && (chars[end].is_ascii_digit() || chars[end] == ',') {
+                end += 1;
+            }
+            if end < chars.len() && chars[end] == '}' && end > start {
+                let inner: String = chars[start..end].iter().collect();
+                *pos = end + 1;
+                if *pos < chars.len() && chars[*pos] == '?' {
+                    *pos += 1;
+                }
+                let min_str = inner.split(',').next().unwrap_or("1");
+                let min_val = min_str.parse::<usize>().unwrap_or(1);
+                return (min_val, false);
+            }
+            (1, false)
+        }
+        _ => (1, false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sample_from_regex_urn_uuid_and_iso_dates() {
+        let urn_regex = r#"/^
+            urn:
+            (?<nid>[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?): # NID
+            (?<nss>.*?)                                   # NSS
+            (?<frc>\?\+(?<rcomponent>.*?))?               # r-component
+            (?<fqc>\?\=(?<qcomponent>.*?))?               # q-component
+            (?:\#(?<fcomponent>.*))?                      # f-component
+        $/xi"#;
+        assert_eq!(sample_from_regex(urn_regex).as_deref(), Some("urn:aa:a"));
+
+        let nid_regex = "/^[a-z0-9]([a-z0-9-]{0,30})[a-z0-9]$/xi";
+        assert_eq!(sample_from_regex(nid_regex).as_deref(), Some("aa"));
+
+        let uuid_regex = "/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i";
+        assert_eq!(
+            sample_from_regex(uuid_regex).as_deref(),
+            Some("aaaaaaaa-aaaa-1aaa-8aaa-aaaaaaaaaaaa")
+        );
+
+        let sql_ymd = "/(\\d{4})-(\\d\\d)-(\\d\\d)/";
+        assert_eq!(sample_from_regex(sql_ymd).as_deref(), Some("2024-01-01"));
+
+        let iso_ymd = "/([+-]\\d{6}|\\d{4})(?:-?(\\d\\d)(?:-?(\\d\\d))?)?/";
+        assert_eq!(sample_from_regex(iso_ymd).as_deref(), Some("2024-01-01"));
+
+        let iso_currency = "/^[A-Z]{3}$/";
+        assert_eq!(sample_from_regex(iso_currency).as_deref(), Some("AAA"));
+    }
 }

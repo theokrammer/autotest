@@ -11,7 +11,7 @@ pub use cache::{AstHashes, DependencyGraph};
 pub use ir::*;
 pub use merger::{MergeMode, MergeReport, ScenarioMerger, StaleAssertionDrift};
 pub use mock::FixtureDeduplicator;
-pub use project_index::{ClassIndexEntry, ProjectIndex};
+pub use project_index::{sample_from_regex, ClassIndexEntry, ProjectIndex};
 pub use scaffolder::EntrypointScaffolder;
 pub use solver::{SolverConfig, SymbolicSolver};
 

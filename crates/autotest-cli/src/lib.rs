@@ -619,8 +619,8 @@ pub fn handle_generate_with_options(dir: &Path, opts: GenerateOptions) -> anyhow
                     }
                 };
 
-                // Always index interfaces/constants even if excluded from target generation
-                project_index.index_source_metadata(&rel_path_str, &content, is_php);
+                // Always index interfaces/constants/lookup-tables even if excluded from target generation
+                project_index.index_source_metadata_with_dir(Some(dir), &rel_path_str, &content, is_php);
 
                 // Scope filtering
                 if !effective_includes.is_empty()
