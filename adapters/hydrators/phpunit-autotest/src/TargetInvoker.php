@@ -64,7 +64,58 @@ final class TargetInvoker
             return $refMethod->invokeArgs(null, $callArgs);
         }
 
-        $instance = $refClass->newInstanceArgs($constructorArgs);
+        $instance = $this->instantiateClass($refClass, $constructorArgs);
         return $refMethod->invokeArgs($instance, $callArgs);
+    }
+
+    private function instantiateClass(\ReflectionClass $refClass, array $constructorArgs): object
+    {
+        $ctor = $refClass->getConstructor();
+        if ($ctor === null) {
+            return $refClass->newInstance();
+        }
+
+        $resolvedArgs = [];
+        $idx = 0;
+        foreach ($ctor->getParameters() as $param) {
+            if (array_key_exists($idx, $constructorArgs)) {
+                $resolvedArgs[] = $constructorArgs[$idx];
+            } elseif ($param->isDefaultValueAvailable()) {
+                $resolvedArgs[] = $param->getDefaultValue();
+            } elseif ($param->allowsNull()) {
+                $resolvedArgs[] = null;
+            } else {
+                $resolvedArgs[] = $this->defaultValueForParam($param);
+            }
+            $idx++;
+        }
+
+        if ($ctor->isPublic()) {
+            return $refClass->newInstanceArgs($resolvedArgs);
+        }
+
+        // Private/protected constructor (immutable value objects like Route, Group, MatchingResult)
+        $instance = $refClass->newInstanceWithoutConstructor();
+        $ctor->invokeArgs($instance, $resolvedArgs);
+        return $instance;
+    }
+
+    private function defaultValueForParam(\ReflectionParameter $param): mixed
+    {
+        $type = $param->getType();
+        if ($type instanceof \ReflectionNamedType) {
+            $name = $type->getName();
+            return match ($name) {
+                'string' => '/test',
+                'int' => 1,
+                'float' => 1.0,
+                'bool' => false,
+                'array' => ['GET'],
+                'iterable' => [],
+                'object' => new \stdClass(),
+                default => class_exists($name) ? (new \ReflectionClass($name))->newInstanceWithoutConstructor() : null,
+            };
+        }
+        return null;
     }
 }

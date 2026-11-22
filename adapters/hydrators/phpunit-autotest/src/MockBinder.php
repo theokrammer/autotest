@@ -14,7 +14,7 @@ final class MockBinder
 
     public function createMockForService(string $interfaceOrClass, array $mockSpecs, object $testCase): object
     {
-        if (method_exists($testCase, 'createMock')) {
+        if (is_callable([$testCase, 'createMock'])) {
             $mock = $testCase->createMock($interfaceOrClass);
         } else {
             // Standalone reflection fallback
@@ -264,7 +264,8 @@ final class MockBinder
                 if ($isVoid) {
                     $methodsCode[] = "public function {$mName}({$paramList}){$retType} { \$this->__dispatch('{$mName}', func_get_args()); return; }";
                 } else {
-                    $methodsCode[] = "public function {$mName}({$paramList}){$retType} { return \$this->__dispatch('{$mName}', func_get_args()); }";
+                    $fallbackExpr = $this->defaultReturnExpr($m->getReturnType());
+                    $methodsCode[] = "public function {$mName}({$paramList}){$retType} { \$r = \$this->__dispatch('{$mName}', func_get_args()); return \$r !== null ? \$r : {$fallbackExpr}; }";
                 }
             }
             $methodsStr = implode("\n", $methodsCode);
@@ -323,5 +324,22 @@ final class MockBinder
         }
 
         return '';
+    }
+
+    private function defaultReturnExpr(?\ReflectionType $type): string
+    {
+        if ($type instanceof \ReflectionNamedType && !$type->allowsNull()) {
+            return match ($type->getName()) {
+                'array', 'iterable' => '[]',
+                'string' => "''",
+                'int' => '0',
+                'float' => '0.0',
+                'bool', 'false' => 'false',
+                'true' => 'true',
+                'object' => 'new \stdClass()',
+                default => 'null',
+            };
+        }
+        return 'null';
     }
 }

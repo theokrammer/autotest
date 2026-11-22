@@ -163,9 +163,15 @@ impl PhpExtractor {
                 Some(serde_json::json!(false))
             } else if raw_val == "null" {
                 Some(serde_json::Value::Null)
-            } else {
+            } else if raw_val == "[]" {
+                Some(serde_json::json!([]))
+            } else if (raw_val.starts_with('\'') && raw_val.ends_with('\''))
+                || (raw_val.starts_with('"') && raw_val.ends_with('"'))
+            {
                 let unquoted = raw_val.trim_matches('\'').trim_matches('"');
                 Some(serde_json::json!(unquoted))
+            } else {
+                None
             }
         } else {
             None

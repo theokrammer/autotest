@@ -73,27 +73,64 @@ final class AutotestHydrator
         unset($m);
 
         // 3. Bind mocks
+        $targetNamespace = '';
+        if (str_contains($targetId, '::')) {
+            [$targetClass] = explode('::', $targetId, 2);
+            $lastSlash = strrpos($targetClass, '\\');
+            if ($lastSlash !== false) {
+                $targetNamespace = substr($targetClass, 0, $lastSlash);
+            }
+        }
+
         $mockInstances = [];
         foreach ($constructorArgsSpec as $ctorParam) {
             $paramType = $ctorParam['type'];
             $paramName = $ctorParam['name'];
 
+            // Resolve short class/interface names relative to target class namespace
+            $resolvedType = ltrim($paramType, '?');
+            if (
+                !interface_exists($resolvedType)
+                && !class_exists($resolvedType)
+                && $targetNamespace !== ''
+                && !str_contains($resolvedType, '\\')
+            ) {
+                $candidate = $targetNamespace . '\\' . $resolvedType;
+                if (interface_exists($candidate) || class_exists($candidate)) {
+                    $resolvedType = $candidate;
+                }
+            }
+
             // Match mocks targeting this parameter
-            $matchingMocks = array_filter($mocks, function ($m) use ($paramName, $paramType) {
+            $matchingMocks = array_filter($mocks, function ($m) use ($paramName, $resolvedType) {
                 $target = $m['target'] ?? '';
-                $shortType = basename(str_replace('\\', '/', $paramType));
+                $shortType = basename(str_replace('\\', '/', $resolvedType));
                 return str_starts_with($target, $paramName . '.')
                     || str_starts_with($target, $paramName . '::')
-                    || str_starts_with($target, $paramType . '::')
-                    || str_starts_with($target, $paramType . '.')
+                    || str_starts_with($target, $resolvedType . '::')
+                    || str_starts_with($target, $resolvedType . '.')
                     || str_starts_with($target, $shortType . '::')
                     || str_starts_with($target, $shortType . '.');
             });
 
-            if (!empty($matchingMocks) || interface_exists($paramType) || class_exists($paramType)) {
-                $mockInstances[] = $this->mockBinder->createMockForService($paramType, $matchingMocks, $testCase);
+            if (!empty($matchingMocks) || interface_exists($resolvedType) || class_exists($resolvedType)) {
+                $mockInstances[] = $this->mockBinder->createMockForService($resolvedType, $matchingMocks, $testCase);
+            } elseif (array_key_exists('default_value', $ctorParam) && $ctorParam['default_value'] !== null) {
+                $mockInstances[] = $this->dtoHydrator->hydrate($ctorParam['default_value'], $paramType);
             } else {
-                $mockInstances[] = $this->dtoHydrator->hydrate($ctorParam['default_value'] ?? null, $paramType);
+                $cleanType = ltrim($paramType, '?');
+                if (str_starts_with($paramType, '?') || str_contains($paramType, 'null')) {
+                    $mockInstances[] = null;
+                } else {
+                    $mockInstances[] = match ($cleanType) {
+                        'string' => '/test',
+                        'int' => 1,
+                        'float' => 1.0,
+                        'bool' => false,
+                        'array', 'iterable' => ['GET'],
+                        default => null,
+                    };
+                }
             }
         }
 
