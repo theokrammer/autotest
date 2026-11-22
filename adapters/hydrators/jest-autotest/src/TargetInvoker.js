@@ -41,6 +41,24 @@ class TargetInvoker {
       });
     }
 
+    const seededTargets = [];
+    if (Array.isArray(scenarioSpec.metadata_seeds) && typeof Reflect !== 'undefined' && typeof Reflect.defineMetadata === 'function') {
+      const params = targetDef.signature?.parameters || [];
+      for (const seed of scenarioSpec.metadata_seeds) {
+        if (!seed || !seed.key) continue;
+        const val = this.dtoHydrator.hydrate(seed.value, classRegistry);
+        if (seed.target_param) {
+          const pIdx = params.findIndex(p => p.name === seed.target_param);
+          if (pIdx >= 0 && inputs[pIdx] && (typeof inputs[pIdx] === 'object' || typeof inputs[pIdx] === 'function')) {
+            Reflect.defineMetadata(seed.key, val, inputs[pIdx]);
+          }
+        } else if (TargetClass) {
+          Reflect.defineMetadata(seed.key, val, TargetClass);
+          seededTargets.push([seed.key, TargetClass]);
+        }
+      }
+    }
+
     try {
       let result;
       if (targetDef.kind === 'function') {
@@ -52,19 +70,27 @@ class TargetInvoker {
           throw new Error(`Function or static method ${targetId} not found in registry`);
         }
       } else {
-        // Instance method - construct with mocks
-        const ctorArgs = (targetDef.signature.constructor_args || []).map(param => {
-          if (mockInstances[param.name]) {
-            return mockInstances[param.name];
-          }
-          // Use default or hydrate from scenario
-          if (param.default_value !== null && param.default_value !== undefined) {
-            return this.dtoHydrator.hydrate(param.default_value, classRegistry);
-          }
-          return undefined;
-        });
+        let instance;
+        if (scenarioSpec.factory && scenarioSpec.factory.method && typeof TargetClass[scenarioSpec.factory.method] === 'function') {
+          const factoryArgs = Array.isArray(scenarioSpec.factory.args)
+            ? scenarioSpec.factory.args.map(a => this.dtoHydrator.hydrate(a, classRegistry))
+            : [];
+          instance = TargetClass[scenarioSpec.factory.method](...factoryArgs);
+        } else {
+          // Instance method - construct with mocks or constructor_overrides
+          const ctorArgs = (targetDef.signature.constructor_args || []).map(param => {
+            if (mockInstances[param.name] !== undefined) {
+              return mockInstances[param.name];
+            }
+            // Use default or hydrate from scenario
+            if (param.default_value !== null && param.default_value !== undefined) {
+              return this.dtoHydrator.hydrate(param.default_value, classRegistry);
+            }
+            return undefined;
+          });
+          instance = new TargetClass(...ctorArgs);
+        }
 
-        let instance = new TargetClass(...ctorArgs);
         if (Array.isArray(scenarioSpec.setup_calls)) {
           for (const call of scenarioSpec.setup_calls) {
             if (call && typeof instance[call.method] === 'function') {
@@ -84,24 +110,48 @@ class TargetInvoker {
         result = instance[methodName](...inputs);
       }
 
-      // Await if result is a promise
+      // Await if result is a promise (with fast timeout guard for unresolving stub callbacks)
       if (result && typeof result.then === 'function') {
-        result = await result;
+        result = await this._awaitWithTimeout(result, 250);
       }
 
       // Higher-order function invocation (e.g. factory/decorator/middleware creators)
       if (Array.isArray(scenarioSpec.invoke_returned_args) && typeof result === 'function') {
         const retArgs = scenarioSpec.invoke_returned_args.map(a => this.dtoHydrator.hydrate(a, classRegistry));
-        result = result(...retArgs);
+        try {
+          result = result(...retArgs);
+        } catch (invokeErr) {
+          if (invokeErr instanceof TypeError && /cannot be invoked without 'new'/i.test(invokeErr.message)) {
+            result = new result(...retArgs);
+          } else {
+            throw invokeErr;
+          }
+        }
         if (result && typeof result.then === 'function') {
-          result = await result;
+          result = await this._awaitWithTimeout(result, 250);
         }
       }
 
       return { result, error: null };
     } catch (error) {
       return { result: null, error };
+    } finally {
+      if (typeof Reflect !== 'undefined' && typeof Reflect.deleteMetadata === 'function') {
+        for (const [k, tgt] of seededTargets) {
+          Reflect.deleteMetadata(k, tgt);
+        }
+      }
     }
+  }
+
+  _awaitWithTimeout(promise, ms) {
+    let timer;
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Autotest async timeout after ${ms}ms`)), ms);
+      }),
+    ]).finally(() => clearTimeout(timer));
   }
 }
 

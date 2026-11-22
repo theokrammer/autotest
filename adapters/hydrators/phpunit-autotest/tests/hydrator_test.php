@@ -143,8 +143,8 @@ namespace Tests\Autotest {
     $asserter = new OutcomeAsserter($dto);
     $testCase = new class {
         public function assertEquals($expected, $actual) {
-            if ($expected !== $actual) {
-                throw new \AssertionError("Expected {$expected}, got {$actual}");
+            if ($expected != $actual) {
+                throw new \AssertionError("Expected " . json_encode($expected) . ", got " . json_encode($actual));
             }
         }
     };
@@ -204,6 +204,31 @@ namespace Tests\Autotest {
         assert($hydratedObj->getPattern() === '/users');
         assert($hydratedObj->getMethods() === ['HEAD']);
         echo "  Private-property object record/hydrate round-trip passed\n";
+
+        // 8. Test type-aware MockBinder + $setup_calls + variadic unpacking
+        $mockResult = $mockBinder->createMockForService(TestService::class, [], $dummyTestCase);
+        assert($mockResult instanceof TestService);
+
+        $variadicObj = new class {
+            public array $items = [];
+            public function addItems(string ...$items): self {
+                $clone = clone $this;
+                $clone->items = array_merge($clone->items, $items);
+                return $clone;
+            }
+        };
+        $updatedVariadic = $dto->replaySetupCalls($variadicObj, [
+            ['method' => 'addItems', 'args' => [['a', 'b']]]
+        ]);
+        assert($updatedVariadic->items === ['a', 'b']);
+        echo "  PHP type-aware mock + variadic setup_calls passed\n";
+
+        // 9. Test ClosureMarker record + OutcomeAsserter parity
+        $objWithClosure = (object)['cb' => fn() => 'ok', 'label' => 'x'];
+        $recClosure = $recorder->recordOutcome($objWithClosure, null);
+        $recClosureDecoded = json_decode(json_encode($recClosure), true);
+        $asserter->assertOutcome($objWithClosure, null, $recClosureDecoded, $testCase);
+        echo "  ClosureMarker record/assert parity passed\n";
     } catch (\Throwable $e) {
         $errors[] = "AutotestHydrator end-to-end failed: " . $e->getMessage();
         echo "  AutotestHydrator end-to-end FAILED: " . get_class($e) . ": " . $e->getMessage() . "\n";

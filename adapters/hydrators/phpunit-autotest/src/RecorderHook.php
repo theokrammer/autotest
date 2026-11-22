@@ -15,6 +15,17 @@ final class RecorderHook
             ];
         }
 
+        if (is_object($actualReturn)) {
+            $mockIface = $this->detectMockInterface($actualReturn);
+            if ($mockIface !== null) {
+                return [
+                    'outcome' => 'return',
+                    'type' => $mockIface,
+                    'expected_events' => [],
+                ];
+            }
+        }
+
         return [
             'outcome' => 'return',
             'type' => is_object($actualReturn) ? get_class($actualReturn) : gettype($actualReturn),
@@ -23,7 +34,28 @@ final class RecorderHook
         ];
     }
 
-    private function serializeValue(mixed $val, int $depth = 0): mixed
+    private function detectMockInterface(object $obj): ?string
+    {
+        $cls = get_class($obj);
+        $isDynamicMock = str_starts_with($cls, 'AutotestMock_')
+            || str_starts_with($cls, 'MockObject_');
+        if (!$isDynamicMock) {
+            return null;
+        }
+        $interfaces = class_implements($obj) ?: [];
+        foreach ($interfaces as $iface) {
+            if (!str_starts_with($iface, 'PHPUnit\\')) {
+                return $iface;
+            }
+        }
+        $parent = get_parent_class($obj);
+        if ($parent !== false) {
+            return $parent;
+        }
+        return 'object';
+    }
+
+    public function serializeValue(mixed $val, int $depth = 0): mixed
     {
         if (is_scalar($val) || $val === null) {
             return $val;
@@ -49,12 +81,15 @@ final class RecorderHook
         }
 
         if ($val instanceof \Closure) {
-            return null;
+            return ['$type' => 'ClosureMarker'];
         }
 
         if (is_object($val)) {
             $class = get_class($val);
             $props = [];
+            foreach (get_object_vars($val) as $k => $v) {
+                $props[$k] = $this->serializeValue($v, $depth + 1);
+            }
             $ref = new \ReflectionClass($val);
             while ($ref !== false) {
                 foreach ($ref->getProperties() as $prop) {

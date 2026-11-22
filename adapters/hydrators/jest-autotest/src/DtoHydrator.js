@@ -1,6 +1,11 @@
 class DtoHydrator {
-  constructor() {
+  constructor(mockBinder = null) {
     this.customFactories = new Map();
+    this.mockBinder = mockBinder;
+  }
+
+  setMockBinder(mockBinder) {
+    this.mockBinder = mockBinder;
   }
 
   registerCustomFactory(typeName, factoryFn) {
@@ -27,6 +32,49 @@ class DtoHydrator {
         }
 
         // Built-in codecs
+        if (type === 'AutoMock') {
+          if (!this.mockBinder) {
+            const { MockBinder } = require('./MockBinder');
+            this.mockBinder = new MockBinder(this);
+          }
+          const specs = [];
+          if (value.methods && typeof value.methods === 'object') {
+            for (const [mName, retVal] of Object.entries(value.methods)) {
+              specs.push({ target: `${value.class || 'Mock'}.${mName}`, returns: [{ return: retVal }] });
+            }
+          }
+          return this.mockBinder.createMock(specs, classRegistry, { recursive: true }).mock;
+        }
+        if (type === 'DecoratedClass') {
+          class AutotestDecorated {
+            handle() { return 'ok'; }
+          }
+          const methodName = value.method_name || 'handle';
+          if (typeof Reflect !== 'undefined' && typeof Reflect.defineMetadata === 'function') {
+            if (value.metadata && typeof value.metadata === 'object') {
+              for (const [k, v] of Object.entries(value.metadata)) {
+                Reflect.defineMetadata(k, this.hydrate(v, classRegistry), AutotestDecorated);
+                if (AutotestDecorated.prototype && typeof AutotestDecorated.prototype[methodName] === 'function') {
+                  Reflect.defineMetadata(k, this.hydrate(v, classRegistry), AutotestDecorated.prototype[methodName]);
+                  Reflect.defineMetadata(k, this.hydrate(v, classRegistry), AutotestDecorated.prototype, methodName);
+                }
+              }
+            }
+            if (value.method_metadata && typeof value.method_metadata === 'object') {
+              for (const [k, v] of Object.entries(value.method_metadata)) {
+                if (AutotestDecorated.prototype && typeof AutotestDecorated.prototype[methodName] === 'function') {
+                  Reflect.defineMetadata(k, this.hydrate(v, classRegistry), AutotestDecorated.prototype[methodName]);
+                  Reflect.defineMetadata(k, this.hydrate(v, classRegistry), AutotestDecorated.prototype, methodName);
+                }
+              }
+            }
+          }
+          const kind = value.kind || 'class';
+          if (kind === 'instance') return new AutotestDecorated();
+          if (kind === 'prototype') return AutotestDecorated.prototype;
+          if (kind === 'method') return AutotestDecorated.prototype[methodName];
+          return AutotestDecorated;
+        }
         if (type === 'Callback') {
           const returnSpec = value.returns;
           return (..._args) => this.hydrate(returnSpec, classRegistry);
@@ -67,7 +115,11 @@ class DtoHydrator {
           const ctorArgs = Array.isArray(value['$ctor'])
             ? value['$ctor'].map(arg => this.hydrate(arg, classRegistry))
             : [];
-          return TargetClass[value['$factory']](...ctorArgs);
+          let instance = TargetClass[value['$factory']](...ctorArgs);
+          if (Array.isArray(value['$setup_calls'])) {
+            instance = this._replaySetupCallsSync(instance, TargetClass, value['$setup_calls'], classRegistry);
+          }
+          return instance;
         }
 
         // Tier 3 & 4: Constructor Instantiation or Prototype-Only Property Hydration
@@ -84,6 +136,9 @@ class DtoHydrator {
             for (const [k, v] of Object.entries(value['$props'])) {
               instance[k] = this.hydrate(v, classRegistry);
             }
+          }
+          if (Array.isArray(value['$setup_calls'])) {
+            instance = this._replaySetupCallsSync(instance, TargetClass, value['$setup_calls'], classRegistry);
           }
           return instance;
         }
@@ -107,6 +162,27 @@ class DtoHydrator {
     }
 
     return value;
+  }
+
+  _replaySetupCallsSync(instance, TargetClass, setupCalls, classRegistry) {
+    for (const call of setupCalls) {
+      if (call && typeof instance[call.method] === 'function') {
+        try {
+          const callArgs = Array.isArray(call.args)
+            ? call.args.map(a => this.hydrate(a, classRegistry))
+            : [];
+          const res = instance[call.method](...callArgs);
+          if (res && typeof res.catch === 'function') {
+            res.catch(() => {});
+          } else if (res instanceof TargetClass) {
+            instance = res;
+          }
+        } catch (_) {
+          // Ignore invalid producer setup call arguments so target invocation still runs
+        }
+      }
+    }
+    return instance;
   }
 }
 

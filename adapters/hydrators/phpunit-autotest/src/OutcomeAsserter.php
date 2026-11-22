@@ -28,7 +28,43 @@ final class OutcomeAsserter
                     );
                 }
 
-                $expectedValue = $this->dtoHydrator->hydrate($expectedSpec['value'] ?? null);
+                if (!array_key_exists('value', $expectedSpec) && !empty($expectedSpec['type'])) {
+                    $expectedType = $expectedSpec['type'];
+                    if (interface_exists($expectedType) || class_exists($expectedType)) {
+                        if (method_exists($testCase, 'assertInstanceOf')) {
+                            $testCase->assertInstanceOf($expectedType, $actualReturn);
+                        } elseif (!($actualReturn instanceof $expectedType)) {
+                            throw new \AssertionError("Expected instance of {$expectedType}");
+                        }
+                    } elseif ($expectedType === 'object') {
+                        if (method_exists($testCase, 'assertIsObject')) {
+                            $testCase->assertIsObject($actualReturn);
+                        } elseif (!is_object($actualReturn)) {
+                            throw new \AssertionError("Expected object");
+                        }
+                    }
+                    break;
+                }
+
+                $rawExpected = $expectedSpec['value'] ?? null;
+                $hasClosureMarker = $actualReturn instanceof \Closure
+                    || str_contains((string)json_encode($rawExpected), '"$type":"ClosureMarker"');
+                if ($hasClosureMarker) {
+                    $recorder = new RecorderHook();
+                    $normalizedActual = json_decode((string)json_encode($recorder->serializeValue($actualReturn)), true);
+                    if (method_exists($testCase, 'assertEquals')) {
+                        $testCase->assertEquals($rawExpected, $normalizedActual);
+                    } elseif ($rawExpected != $normalizedActual) {
+                        throw new \AssertionError(sprintf(
+                            "Expected %s, got %s",
+                            json_encode($rawExpected),
+                            json_encode($normalizedActual)
+                        ));
+                    }
+                    break;
+                }
+
+                $expectedValue = $this->dtoHydrator->hydrate($rawExpected);
                 if (method_exists($testCase, 'assertEquals')) {
                     $testCase->assertEquals($expectedValue, $actualReturn);
                 } else {

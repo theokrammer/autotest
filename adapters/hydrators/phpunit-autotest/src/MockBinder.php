@@ -12,22 +12,31 @@ final class MockBinder
         $this->dtoHydrator = $dtoHydrator;
     }
 
-    public function createMockForService(string $interfaceOrClass, array $mockSpecs, object $testCase): object
+    public function createMockForService(string $interfaceOrClass, array $mockSpecs, object $testCase, int $depth = 0): object
     {
+        if ($depth > 3) {
+            return new \stdClass();
+        }
+        $cleanName = ltrim($interfaceOrClass, '\\');
+        if ($cleanName === 'BackedEnum' || $cleanName === 'UnitEnum') {
+            return $this->synthesizeDefaultForType($cleanName, $depth, $testCase);
+        }
+
         if (is_callable([$testCase, 'createMock'])) {
             $mock = $testCase->createMock($interfaceOrClass);
         } else {
             // Standalone reflection fallback
             if (!interface_exists($interfaceOrClass) && !class_exists($interfaceOrClass)) {
-                return $this->createDynamicMockInterface($interfaceOrClass, $mockSpecs);
+                return $this->createDynamicMockInterface($interfaceOrClass, $mockSpecs, $depth);
             }
             $ref = new \ReflectionClass($interfaceOrClass);
             if ($ref->isInterface() || !$ref->isFinal()) {
-                return $this->createDynamicMockInterface($interfaceOrClass, $mockSpecs);
+                return $this->createDynamicMockInterface($interfaceOrClass, $mockSpecs, $depth);
             }
-            return $ref->newInstanceWithoutConstructor();
+            return $this->synthesizeDefaultForType($interfaceOrClass, $depth + 1, $testCase) ?? $ref->newInstanceWithoutConstructor();
         }
 
+        $configuredMethods = [];
         foreach ($mockSpecs as $spec) {
             $target = $spec['target'] ?? '';
             if (str_contains($target, '::')) {
@@ -36,6 +45,7 @@ final class MockBinder
                 $parts = explode('.', $target);
             }
             $methodName = end($parts);
+            $configuredMethods[$methodName] = true;
 
             $whenArgs = $spec['when_args'] ?? [];
             $returns = $spec['returns'] ?? [];
@@ -84,7 +94,140 @@ final class MockBinder
             });
         }
 
+        // Configure type-aware defaults for unconfigured PHPUnit mock methods (self/static & final classes)
+        if ((interface_exists($interfaceOrClass) || class_exists($interfaceOrClass)) && $depth < 3) {
+            $ref = new \ReflectionClass($interfaceOrClass);
+            foreach ($ref->getMethods(\ReflectionMethod::IS_PUBLIC) as $m) {
+                $mName = $m->getName();
+                if ($m->isConstructor() || $m->isDestructor() || $m->isStatic() || isset($configuredMethods[$mName])) {
+                    continue;
+                }
+                $rt = $m->getReturnType();
+                if (!($rt instanceof \ReflectionNamedType) || $rt->allowsNull() || $rt->isBuiltin()) {
+                    continue;
+                }
+                $rtName = $rt->getName();
+                try {
+                    if ($rtName === 'self' || $rtName === 'static' || ltrim($rtName, '\\') === ltrim($interfaceOrClass, '\\')) {
+                        $mock->method($mName)->willReturnSelf();
+                    } elseif (class_exists($rtName) || interface_exists($rtName)) {
+                        $stub = $this->synthesizeDefaultForType($rtName, $depth + 1, $testCase);
+                        if ($stub !== null) {
+                            $mock->method($mName)->willReturn($stub);
+                        }
+                    }
+                } catch (\Throwable) {
+                    // Ignore non-configurable methods on PHPUnit mocks
+                }
+            }
+        }
+
         return $mock;
+    }
+
+    public function synthesizeDefaultForType(string $typeName, int $depth = 0, ?object $testCase = null): mixed
+    {
+        if ($depth > 3) {
+            return null;
+        }
+
+        $clean = ltrim($typeName, '?\\');
+        if ($clean === '' || $clean === 'object') {
+            return new \stdClass();
+        }
+        if ($clean === 'BackedEnum' || $clean === 'UnitEnum') {
+            if (!enum_exists('Autotest\\Hydrator\\AutotestStubBackedEnum', false)) {
+                eval('namespace Autotest\\Hydrator; enum AutotestStubBackedEnum: string { case TEST = "test"; }');
+            }
+            return \Autotest\Hydrator\AutotestStubBackedEnum::TEST;
+        }
+
+        if (interface_exists($clean)) {
+            if ($testCase !== null && is_callable([$testCase, 'createMock'])) {
+                return $this->createMockForService($clean, [], $testCase, $depth + 1);
+            }
+            return $this->createDynamicMockInterface($clean, [], $depth + 1);
+        }
+
+        if (!class_exists($clean)) {
+            return null;
+        }
+
+        $ref = new \ReflectionClass($clean);
+        if ($ref->isAbstract()) {
+            return null;
+        }
+
+        // 1. Prefer named static factories when available (e.g. MatchingResult::fromFailure)
+        foreach (['fromFailure', 'fromSuccess', 'create', 'get', 'fail', 'success'] as $factoryName) {
+            if ($ref->hasMethod($factoryName)) {
+                $fm = $ref->getMethod($factoryName);
+                if ($fm->isPublic() && $fm->isStatic()) {
+                    $fArgs = [];
+                    foreach ($fm->getParameters() as $fp) {
+                        $fArgs[] = $this->defaultArgForReflectionParam($fp, $depth + 1, $testCase);
+                    }
+                    try {
+                        return $fm->invokeArgs(null, $fArgs);
+                    } catch (\Throwable) {
+                    }
+                }
+            }
+        }
+
+        // 2. Public constructor
+        $ctor = $ref->getConstructor();
+        if ($ctor === null) {
+            return $ref->newInstance();
+        }
+
+        $cArgs = [];
+        foreach ($ctor->getParameters() as $cp) {
+            $cArgs[] = $this->defaultArgForReflectionParam($cp, $depth + 1, $testCase);
+        }
+
+        if ($ctor->isPublic()) {
+            try {
+                return $ref->newInstanceArgs($cArgs);
+            } catch (\Throwable) {
+            }
+        }
+
+        if (!$ref->isFinal()) {
+            return $this->createDynamicMockInterface($clean, [], $depth + 1);
+        }
+
+        $inst = $ref->newInstanceWithoutConstructor();
+        try {
+            $ctor->invokeArgs($inst, $cArgs);
+        } catch (\Throwable) {
+        }
+        return $inst;
+    }
+
+    private function defaultArgForReflectionParam(\ReflectionParameter $param, int $depth, ?object $testCase): mixed
+    {
+        if ($param->isDefaultValueAvailable()) {
+            return $param->getDefaultValue();
+        }
+        if ($param->allowsNull()) {
+            return null;
+        }
+        $type = $param->getType();
+        if ($type instanceof \ReflectionNamedType) {
+            $name = $type->getName();
+            return match ($name) {
+                'string' => '/test',
+                'int' => 1,
+                'float' => 1.0,
+                'bool', 'false' => false,
+                'true' => true,
+                'array', 'iterable' => ['GET'],
+                'object' => new \stdClass(),
+                default => $this->synthesizeDefaultForType($name, $depth + 1, $testCase),
+            };
+        }
+        return null;
     }
 
     public function assertArgumentMatches(mixed $matcher, mixed $actual): void
@@ -197,7 +340,7 @@ final class MockBinder
         return null;
     }
 
-    private function createDynamicMockInterface(string $interfaceOrClass, array $mockSpecs): object
+    private function createDynamicMockInterface(string $interfaceOrClass, array $mockSpecs, int $depth = 0): object
     {
         if (!interface_exists($interfaceOrClass) && !class_exists($interfaceOrClass)) {
             return new class($mockSpecs, $this) {
@@ -261,7 +404,7 @@ final class MockBinder
                 if ($isVoid) {
                     $methodsCode[] = "public function {$mName}({$paramList}){$retType} { \$this->__dispatch('{$mName}', func_get_args()); return; }";
                 } else {
-                    $fallbackExpr = $this->defaultReturnExpr($m->getReturnType());
+                    $fallbackExpr = $this->defaultReturnExpr($m->getReturnType(), $interfaceOrClass, $depth);
                     $methodsCode[] = "public function {$mName}({$paramList}){$retType} { \$r = \$this->__dispatch('{$mName}', func_get_args()); return \$r !== null ? \$r : {$fallbackExpr}; }";
                 }
             }
@@ -270,9 +413,11 @@ final class MockBinder
             $code = "class {$className} {$implementsOrExtends} {
                 private array \$__specs;
                 private \\Autotest\\Hydrator\\MockBinder \$__binder;
-                public function __construct(array \$specs, \\Autotest\\Hydrator\\MockBinder \$binder) {
+                private int \$__depth;
+                public function __construct(array \$specs, \\Autotest\\Hydrator\\MockBinder \$binder, int \$depth = 0) {
                     \$this->__specs = \$specs;
                     \$this->__binder = \$binder;
+                    \$this->__depth = \$depth;
                 }
                 public function __dispatch(string \$name, array \$args): mixed {
                     return \$this->__binder->dispatchDynamicCall(\$this->__specs, \$name, \$args);
@@ -285,7 +430,7 @@ final class MockBinder
             eval($code);
         }
 
-        return new $className($mockSpecs, $this);
+        return new $className($mockSpecs, $this, $depth);
     }
 
     private function formatReflectionType(?\ReflectionType $type, string $ownerClass): string
@@ -323,19 +468,29 @@ final class MockBinder
         return '';
     }
 
-    private function defaultReturnExpr(?\ReflectionType $type): string
+    private function defaultReturnExpr(?\ReflectionType $type, string $ownerClass = '', int $depth = 0): string
     {
         if ($type instanceof \ReflectionNamedType && !$type->allowsNull()) {
-            return match ($type->getName()) {
-                'array', 'iterable' => '[]',
-                'string' => "''",
-                'int' => '0',
-                'float' => '0.0',
-                'bool', 'false' => 'false',
-                'true' => 'true',
-                'object' => 'new \stdClass()',
-                default => 'null',
-            };
+            $name = $type->getName();
+            if ($name === 'self' || $name === 'static' || ($ownerClass !== '' && ltrim($name, '\\') === ltrim($ownerClass, '\\'))) {
+                return '$this';
+            }
+            if ($type->isBuiltin()) {
+                return match ($name) {
+                    'array', 'iterable' => '[]',
+                    'string' => "''",
+                    'int' => '0',
+                    'float' => '0.0',
+                    'bool', 'false' => 'false',
+                    'true' => 'true',
+                    'object' => 'new \stdClass()',
+                    default => 'null',
+                };
+            }
+            if ($depth < 3 && (class_exists($name) || interface_exists($name))) {
+                $escaped = var_export($name, true);
+                return "\$this->__binder->synthesizeDefaultForType({$escaped}, \$this->__depth + 1)";
+            }
         }
         return 'null';
     }

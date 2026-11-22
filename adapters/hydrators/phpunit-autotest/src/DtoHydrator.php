@@ -6,16 +6,54 @@ namespace Autotest\Hydrator;
 final class DtoHydrator
 {
     private static ?array $customFactories = null;
+    private ?MockBinder $mockBinder = null;
+    private ?object $testCase = null;
+
+    public function setMockContext(MockBinder $binder, object $testCase): void
+    {
+        $this->mockBinder = $binder;
+        $this->testCase = $testCase;
+    }
 
     public function hydrate(mixed $value, ?string $expectedType = null): mixed
     {
         if (!is_array($value)) {
+            if ($expectedType !== null && $this->isClassOrInterfaceType($expectedType)) {
+                $targetClass = $this->resolveSingleClassOrInterface($expectedType);
+                if ($targetClass !== null && (!is_object($value) || !($value instanceof $targetClass))) {
+                    if ($this->mockBinder !== null) {
+                        return $this->mockBinder->synthesizeDefaultForType($targetClass, 0, $this->testCase);
+                    }
+                }
+            }
             return $this->coerceScalar($value, $expectedType);
         }
 
         // Built-in codecs
         if (isset($value['$type'])) {
             $type = $value['$type'];
+
+            // AutoMock synthesis
+            if ($type === 'AutoMock') {
+                $mockClass = (string)($value['class'] ?? 'stdClass');
+                $cleanMockClass = ltrim($mockClass, '\\');
+                if (($cleanMockClass === 'BackedEnum' || $cleanMockClass === 'UnitEnum') && $this->mockBinder !== null) {
+                    return $this->mockBinder->synthesizeDefaultForType($cleanMockClass, 0, $this->testCase);
+                }
+                $specs = [];
+                if (isset($value['methods']) && is_array($value['methods'])) {
+                    foreach ($value['methods'] as $mName => $retVal) {
+                        $specs[] = [
+                            'target' => $mockClass . '::' . $mName,
+                            'returns' => [['return' => $retVal]],
+                        ];
+                    }
+                }
+                if ($this->mockBinder !== null && $this->testCase !== null) {
+                    return $this->mockBinder->createMockForService($mockClass, $specs, $this->testCase);
+                }
+                return new \stdClass();
+            }
 
             // Tier 1: Project Custom Factory Registry
             $customFactory = $this->lookupCustomFactory($type);
@@ -32,46 +70,68 @@ final class DtoHydrator
                 return new \DateTimeImmutable($value['value'] ?? 'now');
             }
 
+            $instance = null;
+
             // Tier 2: Static Factory Method
             if (!empty($value['$factory'])) {
                 $factoryMethod = $value['$factory'];
-                $ctorArgs = $this->hydrateArgs($value['$ctor'] ?? []);
+                $rawCtor = $value['$ctor'] ?? [];
                 if (method_exists($type, $factoryMethod)) {
-                    return $type::$factoryMethod(...$ctorArgs);
+                    $refMethod = new \ReflectionMethod($type, $factoryMethod);
+                    $ctorArgs = $this->hydrateMethodArgs($refMethod, $rawCtor);
+                    $instance = $type::$factoryMethod(...$ctorArgs);
                 }
             }
 
             // Tier 3 & 4: Constructor-First with Property-Fallback
-            if (class_exists($type)) {
+            if ($instance === null && class_exists($type)) {
                 $refClass = new \ReflectionClass($type);
-                $instance = null;
-
                 if (isset($value['$ctor'])) {
-                    $ctorArgs = $this->hydrateArgs($value['$ctor']);
-                    $instance = $refClass->newInstanceArgs($ctorArgs);
+                    $ctor = $refClass->getConstructor();
+                    $ctorArgs = $ctor !== null
+                        ? $this->hydrateMethodArgs($ctor, $value['$ctor'])
+                        : $this->hydrateArgs($value['$ctor']);
+                    if ($ctor !== null && !$ctor->isPublic()) {
+                        $instance = $refClass->newInstanceWithoutConstructor();
+                        $ctor->invokeArgs($instance, $ctorArgs);
+                    } else {
+                        $instance = $refClass->newInstanceArgs($ctorArgs);
+                    }
                 } else {
                     $instance = $refClass->newInstanceWithoutConstructor();
                 }
 
-                if ($instance !== null) {
-                    if (isset($value['$props']) && is_array($value['$props'])) {
-                        foreach ($value['$props'] as $propName => $propVal) {
-                            $prop = null;
-                            $currentRef = $refClass;
-                            while ($currentRef !== false) {
-                                if ($currentRef->hasProperty($propName)) {
-                                    $prop = $currentRef->getProperty($propName);
-                                    break;
-                                }
-                                $currentRef = $currentRef->getParentClass();
+                if ($instance !== null && isset($value['$props']) && is_array($value['$props'])) {
+                    foreach ($value['$props'] as $propName => $propVal) {
+                        $prop = null;
+                        $currentRef = $refClass;
+                        while ($currentRef !== false) {
+                            if ($currentRef->hasProperty($propName)) {
+                                $prop = $currentRef->getProperty($propName);
+                                break;
                             }
-                            if ($prop !== null && !$prop->isStatic()) {
-                                $prop->setValue($instance, $this->hydrate($propVal));
-                            }
+                            $currentRef = $currentRef->getParentClass();
+                        }
+                        if ($prop !== null && !$prop->isStatic()) {
+                            $prop->setValue($instance, $this->hydrate($propVal));
                         }
                     }
-                    return $instance;
                 }
+            }
+
+            if ($instance !== null) {
+                if (isset($value['$setup_calls']) && is_array($value['$setup_calls'])) {
+                    $instance = $this->replaySetupCalls($instance, $value['$setup_calls']);
+                }
+                return $instance;
+            }
+        }
+
+        // Empty or plain array passed where a class/interface is expected
+        if ($expectedType !== null && $this->isClassOrInterfaceType($expectedType)) {
+            $targetClass = $this->resolveSingleClassOrInterface($expectedType);
+            if ($targetClass !== null && $this->mockBinder !== null) {
+                return $this->mockBinder->synthesizeDefaultForType($targetClass, 0, $this->testCase);
             }
         }
 
@@ -81,6 +141,120 @@ final class DtoHydrator
             $hydrated[$k] = $this->hydrate($v);
         }
         return $hydrated;
+    }
+
+    public function replaySetupCalls(object $instance, array $setupCalls): object
+    {
+        $className = get_class($instance);
+        $refClass = new \ReflectionClass($className);
+        foreach ($setupCalls as $call) {
+            $method = $call['method'] ?? null;
+            if (!$method || !$refClass->hasMethod($method)) {
+                continue;
+            }
+            $refMethod = $refClass->getMethod($method);
+            $rawArgs = $call['args'] ?? [];
+            $callArgs = $this->hydrateMethodArgs($refMethod, $rawArgs);
+            $res = $refMethod->invokeArgs($instance, $callArgs);
+            if (is_object($res) && $res instanceof $className) {
+                $instance = $res;
+            }
+        }
+        return $instance;
+    }
+
+    public function hydrateMethodArgs(\ReflectionMethod $refMethod, array $rawArgs): array
+    {
+        $callArgs = [];
+        $idx = 0;
+        foreach ($refMethod->getParameters() as $param) {
+            $name = $param->getName();
+            $typeStr = $this->reflectionTypeToString($param->getType());
+            $hasNamed = array_key_exists($name, $rawArgs);
+            $hasIdx = array_key_exists($idx, $rawArgs);
+
+            if ($param->isVariadic()) {
+                if ($hasNamed || $hasIdx) {
+                    $rawVal = $hasNamed ? $rawArgs[$name] : $rawArgs[$idx];
+                    if (is_array($rawVal) && array_is_list($rawVal) && !isset($rawVal['$type']) && !$this->typeAcceptsArray($param->getType())) {
+                        foreach ($rawVal as $item) {
+                            $callArgs[] = $this->hydrate($item, $typeStr);
+                        }
+                    } else {
+                        $callArgs[] = $this->hydrate($rawVal, $typeStr);
+                    }
+                }
+                break;
+            }
+
+            if ($hasNamed) {
+                $callArgs[] = $this->hydrate($rawArgs[$name], $typeStr);
+            } elseif ($hasIdx) {
+                $callArgs[] = $this->hydrate($rawArgs[$idx], $typeStr);
+            } elseif ($param->isDefaultValueAvailable()) {
+                $callArgs[] = $param->getDefaultValue();
+            } elseif ($param->allowsNull()) {
+                $callArgs[] = null;
+            } else {
+                $callArgs[] = $this->hydrate([], $typeStr);
+            }
+            $idx++;
+        }
+        return $callArgs;
+    }
+
+    private function reflectionTypeToString(?\ReflectionType $type): ?string
+    {
+        if ($type instanceof \ReflectionNamedType) {
+            return $type->getName();
+        }
+        if ($type instanceof \ReflectionUnionType) {
+            $names = [];
+            foreach ($type->getTypes() as $t) {
+                if ($t instanceof \ReflectionNamedType && $t->getName() !== 'null') {
+                    $names[] = $t->getName();
+                }
+            }
+            return empty($names) ? null : implode('|', $names);
+        }
+        return null;
+    }
+
+    private function typeAcceptsArray(?\ReflectionType $type): bool
+    {
+        if ($type instanceof \ReflectionNamedType) {
+            return in_array($type->getName(), ['array', 'iterable', 'mixed'], true);
+        }
+        if ($type instanceof \ReflectionUnionType) {
+            foreach ($type->getTypes() as $t) {
+                if ($t instanceof \ReflectionNamedType && in_array($t->getName(), ['array', 'iterable', 'mixed'], true)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private function isClassOrInterfaceType(string $type): bool
+    {
+        foreach (explode('|', $type) as $part) {
+            $clean = ltrim(trim($part), '?\\');
+            if ($clean === '' || in_array(strtolower($clean), ['int', 'float', 'string', 'bool', 'array', 'iterable', 'callable', 'mixed', 'object', 'null', 'void', 'self', 'static'], true)) {
+                return false;
+            }
+        }
+        return $this->resolveSingleClassOrInterface($type) !== null;
+    }
+
+    private function resolveSingleClassOrInterface(string $type): ?string
+    {
+        foreach (explode('|', $type) as $part) {
+            $clean = ltrim(trim($part), '?\\');
+            if ($clean !== '' && (class_exists($clean) || interface_exists($clean))) {
+                return $clean;
+            }
+        }
+        return null;
     }
 
     private function hydrateArgs(array $args): array

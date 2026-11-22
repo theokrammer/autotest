@@ -17,7 +17,8 @@ final class TargetInvoker
         array $constructorArgs,
         array $inputArgs,
         array $setupCalls = [],
-        ?array $invokeReturnedArgs = null
+        ?array $invokeReturnedArgs = null,
+        ?array $factorySpec = null
     ): mixed {
         if (str_contains($targetId, '::')) {
             [$className, $methodName] = explode('::', $targetId, 2);
@@ -35,57 +36,24 @@ final class TargetInvoker
         }
 
         $refMethod = $refClass->getMethod($methodName);
-        $callArgs = [];
-        $idx = 0;
-
-        foreach ($refMethod->getParameters() as $param) {
-            $name = $param->getName();
-            $typeStr = null;
-            if ($param->hasType()) {
-                $type = $param->getType();
-                if ($type instanceof \ReflectionNamedType) {
-                    $typeStr = $type->getName();
-                } else {
-                    $typeStr = (string)$type;
-                }
-            }
-
-            if (array_key_exists($name, $inputArgs)) {
-                $callArgs[] = $this->dtoHydrator->hydrate($inputArgs[$name], $typeStr);
-            } elseif (array_key_exists($idx, $inputArgs)) {
-                $callArgs[] = $this->dtoHydrator->hydrate($inputArgs[$idx], $typeStr);
-            } elseif ($param->isDefaultValueAvailable()) {
-                $callArgs[] = $param->getDefaultValue();
-            } else {
-                throw new \InvalidArgumentException("Missing required parameter: {$name}");
-            }
-            $idx++;
-        }
+        $callArgs = $this->dtoHydrator->hydrateMethodArgs($refMethod, $inputArgs);
 
         if ($refMethod->isStatic()) {
             $result = $refMethod->invokeArgs(null, $callArgs);
         } else {
-            $instance = $this->instantiateClass($refClass, $constructorArgs);
-            foreach ($setupCalls as $call) {
-                $setupMethod = $call['method'] ?? null;
-                if ($setupMethod && $refClass->hasMethod($setupMethod)) {
-                    $setupRef = $refClass->getMethod($setupMethod);
-                    $setupArgs = [];
-                    $rawSetupArgs = $call['args'] ?? [];
-                    foreach ($setupRef->getParameters() as $sIdx => $sParam) {
-                        if (array_key_exists($sIdx, $rawSetupArgs)) {
-                            $sType = $sParam->getType();
-                            $sTypeStr = $sType instanceof \ReflectionNamedType ? $sType->getName() : null;
-                            $setupArgs[] = $this->dtoHydrator->hydrate($rawSetupArgs[$sIdx], $sTypeStr);
-                        } elseif ($sParam->isDefaultValueAvailable()) {
-                            $setupArgs[] = $sParam->getDefaultValue();
-                        }
-                    }
-                    $setupRes = $setupRef->invokeArgs($instance, $setupArgs);
-                    if (is_object($setupRes) && $setupRes instanceof $className) {
-                        $instance = $setupRes;
-                    }
+            $instance = null;
+            if ($factorySpec !== null && !empty($factorySpec['method']) && $refClass->hasMethod($factorySpec['method'])) {
+                $factoryMethod = $refClass->getMethod($factorySpec['method']);
+                if ($factoryMethod->isStatic()) {
+                    $factoryArgs = $this->dtoHydrator->hydrateMethodArgs($factoryMethod, $factorySpec['args'] ?? []);
+                    $instance = $factoryMethod->invokeArgs(null, $factoryArgs);
                 }
+            }
+            if ($instance === null) {
+                $instance = $this->instantiateClass($refClass, $constructorArgs);
+            }
+            if (!empty($setupCalls)) {
+                $instance = $this->dtoHydrator->replaySetupCalls($instance, $setupCalls);
             }
             $result = $refMethod->invokeArgs($instance, $callArgs);
         }
@@ -143,7 +111,7 @@ final class TargetInvoker
                 'array' => ['GET'],
                 'iterable' => [],
                 'object' => new \stdClass(),
-                default => class_exists($name) ? (new \ReflectionClass($name))->newInstanceWithoutConstructor() : null,
+                default => $this->dtoHydrator->hydrate([], $name),
             };
         }
         return null;

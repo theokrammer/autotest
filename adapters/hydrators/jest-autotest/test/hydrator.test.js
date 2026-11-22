@@ -256,5 +256,23 @@ console.log('  Loader $ref resolution tests passed');
   fs.rmSync(tmpDir3, { recursive: true, force: true });
   console.log('  executeAutotestScenario bridge tests passed');
 
+  // === Test recursive Proxy mock (await safety) & DecoratedClass ===
+  const { mock: recMock } = mockBinder.createMock([], {}, { recursive: true });
+  assert.strictEqual(recMock.isValid(), false);
+  assert.deepStrictEqual(recMock.getAllItems(), []);
+  assert(recMock.getModules() instanceof Map);
+  assert.strictEqual(recMock.setPrefix('/api'), recMock);
+  const awaitedProxy = await recMock;
+  assert.strictEqual(awaitedProxy, recMock);
+
+  const decorated = dtoHydrator.hydrate({
+    $type: 'DecoratedClass',
+    kind: 'class',
+    metadata: { path: '/cats' },
+  });
+  assert.strictEqual(typeof decorated, 'function');
+  assert.strictEqual(new decorated().handle(), 'ok');
+  console.log('  Recursive Proxy + DecoratedClass tests passed');
+
   console.log('\nAll @autotest/jest hydrator tests passed!');
 })();

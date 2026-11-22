@@ -26,6 +26,7 @@ class AutotestHydrator {
     this.loader = new Loader();
     this.dtoHydrator = new DtoHydrator();
     this.mockBinder = new MockBinder(this.dtoHydrator);
+    this.dtoHydrator.setMockBinder(this.mockBinder);
     this.targetInvoker = new TargetInvoker(this.dtoHydrator);
     this.outcomeAsserter = new OutcomeAsserter(this.dtoHydrator);
     this.recorderHook = new RecorderHook();
@@ -44,10 +45,16 @@ class AutotestHydrator {
     const mocks = scenarioSpec.mocks || [];
     const ctorArgs = targetDef.signature.constructor_args || [];
 
-    // Build mock instances keyed by constructor parameter name
+    // Build mock instances & constructor_overrides keyed by constructor parameter name
     const mockInstances = {};
+    const ctorOverrides = scenarioSpec.constructor_overrides || {};
     const primitiveTypes = new Set(['string', 'number', 'boolean', 'any', 'unknown', 'object', 'void', 'null', 'undefined']);
     for (const param of ctorArgs) {
+      if (Object.prototype.hasOwnProperty.call(ctorOverrides, param.name)) {
+        mockInstances[param.name] = this.dtoHydrator.hydrate(ctorOverrides[param.name], classRegistry);
+        continue;
+      }
+
       const matchingMocks = mocks.filter(m => {
         const target = m.target || '';
         return target.startsWith(param.name + '.');
@@ -60,7 +67,7 @@ class AutotestHydrator {
         && !primitiveTypes.has(paramType.toLowerCase());
 
       if (matchingMocks.length > 0 || needsAutoMock) {
-        const { mock, verify } = this.mockBinder.createMock(matchingMocks, classRegistry);
+        const { mock, verify } = this.mockBinder.createMock(matchingMocks, classRegistry, { recursive: true });
         mockInstances[param.name] = mock;
         // Store verifier for post-invocation
         mockInstances[`__verify_${param.name}`] = verify;
@@ -68,7 +75,12 @@ class AutotestHydrator {
     }
 
     // Invoke target
-    const outcome = await this.targetInvoker.invoke(targetDef, scenarioSpec, mockInstances, classRegistry);
+    let outcome;
+    try {
+      outcome = await this.targetInvoker.invoke(targetDef, scenarioSpec, mockInstances, classRegistry);
+    } catch (invokeErr) {
+      outcome = { result: null, error: invokeErr };
+    }
 
     // Record mode: stage the outcome and skip placeholder assertions
     if (options.record) {
@@ -205,6 +217,57 @@ async function executeAutotestScenario(scenarioFilePath, scenarioSpec, options =
   }
 
   const classRegistry = Object.assign({}, options.classRegistry || {});
+
+  // Pre-load any cross-file DTO $source_file dependencies referenced in inputs/overrides/mocks
+  const sourceDeps = new Map();
+  const collectSourceRefs = (val) => {
+    if (!val || typeof val !== 'object') return;
+    if (Array.isArray(val)) {
+      for (const item of val) collectSourceRefs(item);
+      return;
+    }
+    if (typeof val.$type === 'string' && typeof val.$source_file === 'string' && !classRegistry[val.$type]) {
+      sourceDeps.set(val.$type, val.$source_file);
+    }
+    for (const v of Object.values(val)) collectSourceRefs(v);
+  };
+  collectSourceRefs(scenarioSpec.inputs);
+  collectSourceRefs(scenarioSpec.mocks);
+  collectSourceRefs(scenarioSpec.setup_calls);
+  collectSourceRefs(scenarioSpec.constructor_overrides);
+  collectSourceRefs(scenarioSpec.factory);
+
+  for (const [depType, depFile] of sourceDeps.entries()) {
+    const depCandidates = Array.from(new Set([
+      path.resolve(process.cwd(), depFile),
+      path.resolve(path.dirname(resolvedPath), depFile),
+      path.resolve(process.cwd(), depFile.replace(/\.tsx?$/, '.js')),
+    ]));
+    for (const cand of depCandidates) {
+      if (!fs.existsSync(cand)) continue;
+      try {
+        let depMod = moduleCache.get(cand);
+        if (!depMod) {
+          if (typeof options.loadModule === 'function') {
+            depMod = await options.loadModule(cand);
+          } else {
+            try {
+              depMod = require(cand);
+            } catch (_) {
+              depMod = await import(pathToFileURL(cand).href);
+            }
+          }
+          if (depMod) moduleCache.set(cand, depMod);
+        }
+        if (depMod && depMod[depType]) {
+          classRegistry[depType] = depMod[depType];
+          break;
+        }
+      } catch (_) {
+      }
+    }
+  }
+
   const parts = matchedTarget.id.split('.');
   const className = parts[0];
 

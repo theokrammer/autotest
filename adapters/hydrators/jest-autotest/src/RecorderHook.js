@@ -53,9 +53,10 @@ class RecorderHook {
       };
     } else if (this._isOpaqueRuntimeObject(outcome.result)) {
       const ctorName = outcome.result.constructor && outcome.result.constructor.name;
+      const safeType = (!ctorName || /^[0-9a-f]{12,}$/i.test(ctorName)) ? 'object' : ctorName;
       entry.expected = {
         outcome: 'return',
-        type: ctorName || 'object',
+        type: safeType,
       };
     } else {
       entry.expected = {
@@ -166,6 +167,9 @@ class RecorderHook {
       return true;
     }
     const ctorName = value.constructor && value.constructor.name;
+    if (ctorName && /^[0-9a-f]{12,}$/i.test(ctorName)) {
+      return true;
+    }
     if (ctorName === 'Object' || value.constructor === Map || value.constructor === Set) {
       return false;
     }
@@ -189,6 +193,13 @@ class RecorderHook {
         || (prop instanceof Set && prop.constructor !== Set)
       ) {
         return true;
+      }
+      if (prop && typeof prop === 'object' && !Array.isArray(prop)) {
+        for (const subKey of Object.keys(prop)) {
+          if (typeof prop[subKey] === 'function') {
+            return true;
+          }
+        }
       }
     }
     return false;

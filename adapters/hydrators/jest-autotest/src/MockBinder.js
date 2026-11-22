@@ -13,7 +13,7 @@ class MockBinder {
    * @param {object} classRegistry - Map of type names to constructors for hydration
    * @returns {{ mock: object, verify: () => void }}
    */
-  createMock(mockSpecs, classRegistry = {}) {
+  createMock(mockSpecs, classRegistry = {}, options = {}) {
     const mock = {};
     const verifiers = [];
 
@@ -100,14 +100,86 @@ class MockBinder {
       }
     }
 
+    const finalMock = options.recursive ? this._createRecursiveProxy(mock, 0, 4) : mock;
+
     return {
-      mock,
+      mock: finalMock,
       verify: () => {
         for (const v of verifiers) {
           v();
         }
       }
     };
+  }
+
+  _createRecursiveProxy(baseTarget = {}, depth = 0, maxDepth = 4) {
+    const stubCache = new Map();
+    const ignoredKeys = new Set([
+      'then', 'catch', 'finally', '$$typeof', 'asymmetricMatch', 'nodeType',
+      'toJSON', '@@__IMMUTABLE_ITERABLE__@@', '@@__IMMUTABLE_RECORD__@@',
+      'constructor', 'prototype', '__esModule', 'default', 'inspect', 'valueOf',
+      'length', 'size', 'toString', 'Symbol(nodejs.util.inspect.custom)'
+    ]);
+
+    const proxy = new Proxy(baseTarget, {
+      get: (target, prop, receiver) => {
+        if (Reflect.has(target, prop)) {
+          return Reflect.get(target, prop, receiver);
+        }
+        if (prop === Symbol.iterator) {
+          return function* () {};
+        }
+        if (typeof prop === 'symbol' || ignoredKeys.has(String(prop))) {
+          return undefined;
+        }
+        const key = String(prop);
+        if (stubCache.has(key)) {
+          return stubCache.get(key);
+        }
+
+        const fn = (..._args) => {
+          const kl = key.toLowerCase();
+          if (key === 'values' || key === 'keys' || key === 'entries') {
+            return [][Symbol.iterator]();
+          }
+          if (key === 'forEach') {
+            return undefined;
+          }
+          if (key === 'has') {
+            return false;
+          }
+          if (key === 'set' || key === 'add') {
+            return proxy;
+          }
+          if (/^(set|add|with|use|register|pipe|on|once|off|emit|subscribe|unsubscribe|append|prepend|push|configure|enable|disable)[A-Z_]?/.test(key)) {
+            return proxy;
+          }
+          if (/^(is|has|can|should|supports|contains|includes|exists)[A-Z]/.test(key)) {
+            return false;
+          }
+          if (/^(getModules|getProviders|getControllers|getExports|getImports|getMiddlewares|getRoutes|getNonAliasProviders|getInjectables)$/.test(key)) {
+            return new Map();
+          }
+          if (/^(getAll|getGlobal|getMetadata|scan|list|find|extract)/.test(key)
+            || (kl.endsWith('s') && !['options', 'status', 'address', 'class', 'prefix', 'alias'].some(s => kl.endsWith(s)))) {
+            return [];
+          }
+          if (/^(count|getCount|getLength|getStatus|getPort)$/.test(key)) {
+            return 0;
+          }
+          if (/^(getPrefix|getGlobalPrefix|getName|getPath|getMethod|getType|getKey|getId|getToken|getVersion|getHost)$/.test(key)) {
+            return '';
+          }
+          if (depth < maxDepth) {
+            return this._createRecursiveProxy({}, depth + 1, maxDepth);
+          }
+          return {};
+        };
+        stubCache.set(key, fn);
+        return fn;
+      },
+    });
+    return proxy;
   }
 
   _assertArgMatch(matcher, actual) {

@@ -24,6 +24,8 @@ final class AutotestHydrator
 
     public function executeScenario(string $scenarioFilePath, array $scenarioSpec, object $testCase, array $options = []): void
     {
+        $this->dtoHydrator->setMockContext($this->mockBinder, $testCase);
+
         // 1. Resolve references if needed
         $mocks = $scenarioSpec['mocks'] ?? [];
         $inputs = $scenarioSpec['inputs'] ?? [];
@@ -72,7 +74,8 @@ final class AutotestHydrator
         }
         unset($m);
 
-        // 3. Bind mocks
+        // 3. Bind mocks & constructor overrides
+        $targetClass = '';
         $targetNamespace = '';
         if (str_contains($targetId, '::')) {
             [$targetClass] = explode('::', $targetId, 2);
@@ -82,13 +85,33 @@ final class AutotestHydrator
             }
         }
 
+        // Prefer live PHP reflection types for constructor params so FQCNs match
+        $refCtorParams = [];
+        if ($targetClass !== '' && class_exists($targetClass)) {
+            $refCls = new \ReflectionClass($targetClass);
+            $refCtor = $refCls->getConstructor();
+            if ($refCtor !== null) {
+                foreach ($refCtor->getParameters() as $rp) {
+                    $rt = $rp->getType();
+                    $rtName = $rt instanceof \ReflectionNamedType ? $rt->getName() : null;
+                    $refCtorParams[$rp->getName()] = $rtName;
+                }
+            }
+        }
+
+        $constructorOverrides = $scenarioSpec['constructor_overrides'] ?? [];
         $mockInstances = [];
         foreach ($constructorArgsSpec as $ctorParam) {
             $paramType = $ctorParam['type'];
             $paramName = $ctorParam['name'];
 
-            // Resolve short class/interface names relative to target class namespace
-            $resolvedType = ltrim($paramType, '?');
+            if (array_key_exists($paramName, $constructorOverrides)) {
+                $mockInstances[] = $this->dtoHydrator->hydrate($constructorOverrides[$paramName]);
+                continue;
+            }
+
+            // Resolve short class/interface names relative to target class namespace or reflection
+            $resolvedType = ltrim($refCtorParams[$paramName] ?? $paramType, '?');
             if (
                 !interface_exists($resolvedType)
                 && !class_exists($resolvedType)
@@ -142,6 +165,7 @@ final class AutotestHydrator
         $invokeReturnedArgs = array_key_exists('invoke_returned_args', $scenarioSpec)
             ? $scenarioSpec['invoke_returned_args']
             : null;
+        $factorySpec = $scenarioSpec['factory'] ?? null;
 
         try {
             $actualReturn = $this->targetInvoker->invokeTarget(
@@ -149,7 +173,8 @@ final class AutotestHydrator
                 $mockInstances,
                 $inputs,
                 $setupCalls,
-                $invokeReturnedArgs
+                $invokeReturnedArgs,
+                $factorySpec
             );
         } catch (\Throwable $t) {
             $actualException = $t;
