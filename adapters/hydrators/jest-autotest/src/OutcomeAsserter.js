@@ -28,9 +28,11 @@ class OutcomeAsserter {
       const error = outcome.error;
 
       if (expectedType) {
-        const ExpectedClass = classRegistry[expectedType] || Error;
-        if (expect) {
+        const ExpectedClass = classRegistry[expectedType] || (expectedType === 'Object' ? Object : Error);
+        if (expect && error instanceof Error && ExpectedClass !== Object) {
           expect(error).toBeInstanceOf(ExpectedClass);
+        } else if (expect) {
+          expect(error && error.constructor ? error.constructor.name : typeof error).toBe(expectedType);
         } else if (!(error instanceof ExpectedClass) && error.name !== expectedType && error.constructor.name !== expectedType) {
           throw new Error(
             `Expected error type ${expectedType}, got ${error.constructor.name}`
@@ -64,22 +66,50 @@ class OutcomeAsserter {
 
     const actual = outcome.result;
 
-    // Check type
+    // Check type (only for unambiguous JS runtime types; TS-only types like void, Promise<T>, unions, interfaces are not typeof values)
     if (expected.type) {
+      const normalizedType = expected.type.trim().replace(/^Promise<(.+)>$/, '$1').trim();
       const actualType = typeof actual;
-      if (expected.type === 'null') {
-        this._assert(actual === null || actual === undefined, `Expected null, got ${actual}`);
-      } else if (expect) {
-        expect(actualType).toBe(expected.type);
-      } else {
-        this._assert(actualType === expected.type, `Expected type ${expected.type}, got ${actualType}`);
+      if (normalizedType === 'null' || normalizedType === 'void' || normalizedType === 'undefined') {
+        this._assert(actual === null || actual === undefined, `Expected ${normalizedType}, got ${actual}`);
+      } else if (normalizedType === 'object') {
+        this._assert(actual !== null && typeof actual === 'object', `Expected object, got ${actualType}`);
+      } else if (['string', 'number', 'boolean', 'bigint', 'symbol', 'function'].includes(normalizedType)) {
+        if (expect) {
+          expect(actualType).toBe(normalizedType);
+        } else {
+          this._assert(actualType === normalizedType, `Expected type ${normalizedType}, got ${actualType}`);
+        }
+      } else if (normalizedType === 'array' || normalizedType.endsWith('[]') || normalizedType.startsWith('Array<')) {
+        this._assert(Array.isArray(actual), `Expected array (${normalizedType}), got ${actualType}`);
+      } else if (
+        expected.value === undefined
+        && /^[A-Z][A-Za-z0-9_]*$/.test(normalizedType)
+        && actual !== null
+        && actual !== undefined
+        && typeof actual === 'object'
+        && actual.constructor
+      ) {
+        if (expect) {
+          expect(actual.constructor.name).toBe(normalizedType);
+        } else {
+          this._assert(
+            actual.constructor.name === normalizedType,
+            `Expected instance of ${normalizedType}, got ${actual.constructor.name}`
+          );
+        }
       }
     }
 
     // Check exact value
     if (expected.value !== undefined) {
-      const expectedValue = this.dtoHydrator.hydrate(expected.value, classRegistry);
-      if (expect) {
+      const expectedValue = this._hydrateExpectedForActual(expected.value, actual, classRegistry, expect);
+      if (expectedValue === null && actual === undefined) {
+        // JSON has no undefined; older recordings serialized undefined returns as null
+        if (expect) {
+          expect(actual == null).toBe(true);
+        }
+      } else if (expect) {
         expect(actual).toEqual(expectedValue);
       } else {
         this._assertDeepEqual(actual, expectedValue);
@@ -108,6 +138,116 @@ class OutcomeAsserter {
     if (expected.falsy === true) {
       this._assert(!actual, `Expected falsy value, got ${actual}`);
     }
+  }
+
+  _hydrateExpectedForActual(rawExpected, actual, classRegistry, expect) {
+    if (rawExpected === null || rawExpected === undefined || typeof rawExpected !== 'object') {
+      return rawExpected;
+    }
+
+    if (Array.isArray(rawExpected)) {
+      return rawExpected.map((item, idx) =>
+        this._hydrateExpectedForActual(item, Array.isArray(actual) ? actual[idx] : undefined, classRegistry, expect)
+      );
+    }
+
+    if (typeof rawExpected['$type'] === 'string') {
+      const type = rawExpected['$type'];
+      if (type === 'Undefined') {
+        return undefined;
+      }
+      if (type === 'Function') {
+        if (expect && typeof expect.any === 'function') {
+          return expect.any(Function);
+        }
+        return typeof actual === 'function' ? actual : undefined;
+      }
+      if (type === 'Symbol') {
+        if (typeof actual === 'symbol' && (actual.description || '') === (rawExpected.description || '')) {
+          return actual;
+        }
+        return Symbol(rawExpected.description || '');
+      }
+      if (type === 'Number') {
+        return Number(rawExpected.value);
+      }
+      if (type === 'Date' || type === 'DateTimeImmutable') {
+        return new Date(rawExpected.value || Date.now());
+      }
+      if (type === 'Buffer') {
+        return Buffer.from(Array.isArray(rawExpected.data) ? rawExpected.data : []);
+      }
+      if (['Uint8Array', 'Int8Array', 'Uint16Array', 'Int16Array', 'Uint32Array', 'Int32Array', 'Float32Array', 'Float64Array'].includes(type)) {
+        const Ctor = globalThis[type];
+        return new Ctor(Array.isArray(rawExpected.data) ? rawExpected.data : []);
+      }
+      if (type === 'Map') {
+        const entries = Array.isArray(rawExpected.entries)
+          ? rawExpected.entries.map(([k, v]) => [
+              this._hydrateExpectedForActual(k, undefined, classRegistry, expect),
+              this._hydrateExpectedForActual(v, undefined, classRegistry, expect),
+            ])
+          : [];
+        return new Map(entries);
+      }
+      if (type === 'Set') {
+        const vals = Array.isArray(rawExpected.values)
+          ? rawExpected.values.map(v => this._hydrateExpectedForActual(v, undefined, classRegistry, expect))
+          : [];
+        return new Set(vals);
+      }
+
+      // If actual is an instance of the exact recorded class (even if not in classRegistry),
+      // hydrate into its prototype so Vitest/Jest toEqual matches class instances cleanly.
+      const TargetClass = classRegistry[type]
+        || (actual && typeof actual === 'object' && actual.constructor && actual.constructor.name === type
+          ? actual.constructor
+          : null);
+
+      if (rawExpected['$error'] && TargetClass && typeof TargetClass === 'function') {
+        const msg = rawExpected['$props'] ? rawExpected['$props'].message : '';
+        const errInstance = new TargetClass(msg);
+        if (rawExpected['$props'] && typeof rawExpected['$props'] === 'object') {
+          for (const [k, v] of Object.entries(rawExpected['$props'])) {
+            if (k === 'message') continue;
+            if (k === 'name' && errInstance.name === v) continue;
+            errInstance[k] = this._hydrateExpectedForActual(v, actual ? actual[k] : undefined, classRegistry, expect);
+          }
+        }
+        return errInstance;
+      }
+
+      if (TargetClass && typeof TargetClass === 'function' && TargetClass.prototype && typeof TargetClass.prototype === 'object') {
+        if (TargetClass.prototype instanceof Map || TargetClass.prototype instanceof Set) {
+          if (expect && typeof expect.any === 'function') {
+            return expect.any(TargetClass);
+          }
+          return actual;
+        }
+        const instance = Array.isArray(rawExpected['$ctor'])
+          ? new TargetClass(...rawExpected['$ctor'].map(a => this.dtoHydrator.hydrate(a, classRegistry)))
+          : Object.create(TargetClass.prototype);
+        if (rawExpected['$props'] && typeof rawExpected['$props'] === 'object') {
+          for (const [k, v] of Object.entries(rawExpected['$props'])) {
+            instance[k] = this._hydrateExpectedForActual(v, actual ? actual[k] : undefined, classRegistry, expect);
+          }
+        }
+        return instance;
+      }
+
+      return this.dtoHydrator.hydrate(rawExpected, classRegistry);
+    }
+
+    const out = {};
+    for (const [k, v] of Object.entries(rawExpected)) {
+      out[k] = this._hydrateExpectedForActual(
+        v,
+        actual && typeof actual === 'object' ? actual[k] : undefined,
+        classRegistry,
+        expect
+      );
+    }
+    return out;
   }
 
   _assert(condition, message) {

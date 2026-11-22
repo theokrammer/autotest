@@ -61,7 +61,7 @@ impl TsPrecheckExtractor {
         let mut dependencies = BTreeMap::new();
 
         for class in &classes {
-            if !class.is_exported && classes.len() > 1 {
+            if !class.is_exported {
                 continue;
             }
 
@@ -104,9 +104,9 @@ impl TsPrecheckExtractor {
             }
         }
 
-        // Top-level standalone functions
+        // Top-level standalone functions (only exported functions can be imported by test runners)
         for func in &functions {
-            if !func.is_exported && !classes.is_empty() {
+            if !func.is_exported {
                 continue;
             }
 
@@ -221,6 +221,9 @@ impl TsPrecheckExtractor {
         .unwrap();
 
         for cap in class_re.captures_iter(&clean_source) {
+            if Self::brace_depth_at(&clean_source, cap.get(0).unwrap().start()) != 0 {
+                continue;
+            }
             let is_exported = cap.get(1).is_some();
             let class_name = cap[2].to_string();
             let class_start = cap.get(0).unwrap().end();
@@ -256,29 +259,32 @@ impl TsPrecheckExtractor {
                 }
             }
 
-            // Extract Constructor
-            let ctor_re = Regex::new(r"constructor\s*\(([^)]*)\)\s*\{").unwrap();
-            if let Some(ctor_cap) = ctor_re.captures(&class_body) {
-                let params_str = &ctor_cap[1];
-                constructor_params = Self::parse_parameters(params_str);
+            // Extract Constructor (balanced parens so default values like `= new ApplicationConfig()` work)
+            let ctor_re = Regex::new(r"(?m)^\s*(?:public\s+|protected\s+|private\s+)?constructor\s*\(").unwrap();
+            if let Some(ctor_match) = ctor_re.find(&class_body) {
+                if Self::brace_depth_at(&class_body, ctor_match.start()) == 0 {
+                    if let Some(params_str) = Self::extract_balanced_parens(&class_body[ctor_match.end() - 1..]) {
+                        constructor_params = Self::parse_parameters(&params_str);
 
-                // Parameter properties (e.g. constructor(public name: string, private id: number))
-                for raw_param in params_str.split(',') {
-                    let trimmed = raw_param.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    if trimmed.starts_with("public ") || (trimmed.contains("readonly ") && !trimmed.contains("private ") && !trimmed.contains("protected ")) {
-                        let name_part = trimmed.split(':').next().unwrap_or("").trim();
-                        let p_name = name_part.split_whitespace().last().unwrap_or("");
-                        if !p_name.is_empty() && !public_properties.contains(&p_name.to_string()) {
-                            public_properties.push(p_name.to_string());
-                        }
-                    } else if trimmed.starts_with("private ") {
-                        let name_part = trimmed.split(':').next().unwrap_or("").trim();
-                        let p_name = name_part.split_whitespace().last().unwrap_or("");
-                        if !p_name.is_empty() {
-                            private_properties.push(p_name.to_string());
+                        // Parameter properties (e.g. constructor(public name: string, private id: number))
+                        for raw_param in params_str.split(',') {
+                            let trimmed = raw_param.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            if trimmed.starts_with("public ") || (trimmed.contains("readonly ") && !trimmed.contains("private ") && !trimmed.contains("protected ")) {
+                                let name_part = trimmed.split(':').next().unwrap_or("").trim();
+                                let p_name = name_part.split_whitespace().last().unwrap_or("");
+                                if !p_name.is_empty() && !public_properties.contains(&p_name.to_string()) {
+                                    public_properties.push(p_name.to_string());
+                                }
+                            } else if trimmed.starts_with("private ") {
+                                let name_part = trimmed.split(':').next().unwrap_or("").trim();
+                                let p_name = name_part.split_whitespace().last().unwrap_or("");
+                                if !p_name.is_empty() {
+                                    private_properties.push(p_name.to_string());
+                                }
+                            }
                         }
                     }
                 }
@@ -302,12 +308,17 @@ impl TsPrecheckExtractor {
                 }
             }
 
-            // Extract Methods
+            // Extract Methods (depth-0 class members only, capturing all modifiers)
             let method_re = Regex::new(
-                r"(?m)(?:@\w+(?:\([^)]*\))?\s*)*(public\s+|private\s+|protected\s+|static\s+|async\s+)*(\w+)\s*(?:<[^>]+>)?\s*\(([^)]*)\)\s*(?::\s*([^\{]+))?\s*\{"
+                r"(?m)^\s*((?:(?:public|private|protected|static|async|readonly|override|abstract|get|set)\s+)*)(\w+)\s*(?:<[^>]+>)?\s*\(([^)]*)\)\s*(?::\s*([^\{;\n]+))?\s*\{"
             ).unwrap();
 
             for m_cap in method_re.captures_iter(&class_body) {
+                let match_start = m_cap.get(0).unwrap().start();
+                if Self::brace_depth_at(&class_body, match_start) != 0 {
+                    continue;
+                }
+
                 let modifiers = m_cap.get(1).map_or("", |m| m.as_str());
                 let method_name = m_cap[2].to_string();
 
@@ -317,9 +328,22 @@ impl TsPrecheckExtractor {
                     continue;
                 }
 
+                // Skip getter/setter accessors and abstract declarations
+                if modifiers.contains("get ")
+                    || modifiers.contains("set ")
+                    || modifiers.contains("abstract ")
+                {
+                    continue;
+                }
+
                 let is_static = modifiers.contains("static");
                 let is_async = modifiers.contains("async");
                 let is_public = !modifiers.contains("private") && !modifiers.contains("protected");
+
+                if methods.iter().any(|m: &TsMethodMetadata| m.name == method_name && m.is_static == is_static) {
+                    continue;
+                }
+
                 let raw_params = &m_cap[3];
                 let return_type = m_cap.get(4).map(|m| m.as_str().trim().to_string());
 
@@ -330,7 +354,27 @@ impl TsPrecheckExtractor {
                 let method_body = Self::extract_braced_block(&class_body[method_start - 1..])
                     .unwrap_or_default();
 
-                let detected_side_effects = Self::detect_side_effects(&method_body);
+                let mut detected_side_effects = Self::detect_side_effects(&method_body);
+                if class_body.contains("randomStringGenerator(")
+                    && !detected_side_effects.iter().any(|e| e.effect_type == "rng")
+                {
+                    detected_side_effects.push(DetectedSideEffect {
+                        effect_type: "rng".to_string(),
+                        target: "random".to_string(),
+                        mockable: true,
+                    });
+                }
+                if class_body.contains("new Promise")
+                    && (method_body.contains("return this.promise")
+                        || method_body.contains("return this.settledPromise")
+                        || method_body.contains("return this.wait()"))
+                {
+                    detected_side_effects.push(DetectedSideEffect {
+                        effect_type: "unmockable_side_effect".to_string(),
+                        target: "async.deferred_promise".to_string(),
+                        mockable: false,
+                    });
+                }
                 let throws = Self::detect_throws(&method_body);
 
                 methods.push(TsMethodMetadata {
@@ -357,15 +401,18 @@ impl TsPrecheckExtractor {
             });
         }
 
-        // Extract Top-Level / Standalone Functions
+        // Extract Top-Level / Standalone Functions (depth-0 only)
         let mut functions = Vec::new();
 
         // 1. function declarations: export (default )?(async )?function name(...)
         let fn_decl_re = Regex::new(
-            r"(?m)(?:@\w+(?:\([^)]*\))?\s*)*(export\s+(?:default\s+)?)?(?:async\s+)?function(?:\s+(\w+))?\s*(?:<[^>]+>)?\s*\(([^)]*)\)\s*(?::\s*([^\{]+))?\s*\{"
+            r"(?m)^\s*(export\s+(?:default\s+)?)?(?:async\s+)?function(?:\s+(\w+))?\s*(?:<[^>]+>)?\s*\(([^)]*)\)\s*(?::\s*([^\{;\n]+))?\s*\{"
         ).unwrap();
 
         for f_cap in fn_decl_re.captures_iter(&clean_source) {
+            if Self::brace_depth_at(&clean_source, f_cap.get(0).unwrap().start()) != 0 {
+                continue;
+            }
             let is_exported = f_cap.get(1).is_some();
             let fn_name = f_cap.get(2).map_or("default", |m| m.as_str()).to_string();
             let raw_params = &f_cap[3];
@@ -374,7 +421,16 @@ impl TsPrecheckExtractor {
             let parameters = Self::parse_parameters(raw_params);
             let fn_start = f_cap.get(0).unwrap().end();
             let fn_body = Self::extract_braced_block(&clean_source[fn_start - 1..]).unwrap_or_default();
-            let detected_side_effects = Self::detect_side_effects(&fn_body);
+            let mut detected_side_effects = Self::detect_side_effects(&fn_body);
+            if fn_name.to_lowercase().contains("random")
+                && !detected_side_effects.iter().any(|e| e.effect_type == "rng")
+            {
+                detected_side_effects.push(DetectedSideEffect {
+                    effect_type: "rng".to_string(),
+                    target: "random".to_string(),
+                    mockable: true,
+                });
+            }
             let throws = Self::detect_throws(&fn_body);
 
             functions.push(TsFunctionMetadata {
@@ -390,10 +446,13 @@ impl TsPrecheckExtractor {
 
         // 2. arrow / expression assignments: export const/let/var name = (async )?(...) => ...
         let fn_expr_re = Regex::new(
-            r"(?m)(export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:\(([^)]*)\)|(\w+))\s*(?::\s*([^=>\{]+))?\s*=>\s*(\{)?"
+            r"(?m)^\s*(export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:\(([^)]*)\)|(\w+))\s*(?::\s*([^=>\{\n]+))?\s*=>\s*(\{)?"
         ).unwrap();
 
         for f_cap in fn_expr_re.captures_iter(&clean_source) {
+            if Self::brace_depth_at(&clean_source, f_cap.get(0).unwrap().start()) != 0 {
+                continue;
+            }
             let is_exported = f_cap.get(1).is_some();
             let fn_name = f_cap[2].to_string();
             if functions.iter().any(|f| f.name == fn_name) {
@@ -410,7 +469,16 @@ impl TsPrecheckExtractor {
             } else {
                 clean_source[fn_start..].lines().next().unwrap_or("").to_string()
             };
-            let detected_side_effects = Self::detect_side_effects(&fn_body);
+            let mut detected_side_effects = Self::detect_side_effects(&fn_body);
+            if fn_name.to_lowercase().contains("random")
+                && !detected_side_effects.iter().any(|e| e.effect_type == "rng")
+            {
+                detected_side_effects.push(DetectedSideEffect {
+                    effect_type: "rng".to_string(),
+                    target: "random".to_string(),
+                    mockable: true,
+                });
+            }
             let throws = Self::detect_throws(&fn_body);
 
             functions.push(TsFunctionMetadata {
@@ -448,7 +516,7 @@ impl TsPrecheckExtractor {
                 .trim();
 
             let parts: Vec<&str> = without_modifiers.split(':').collect();
-            let name_part = parts[0].trim();
+            let name_part = parts[0].split('=').next().unwrap_or("").trim();
             let is_optional = name_part.ends_with('?') || without_modifiers.contains('=');
             let param_name = name_part.trim_end_matches('?').trim().to_string();
 
@@ -459,7 +527,27 @@ impl TsPrecheckExtractor {
             };
 
             let default_val = if without_modifiers.contains('=') {
-                without_modifiers.split('=').nth(1).map(|v| serde_json::Value::String(v.trim().to_string()))
+                let raw = without_modifiers.splitn(2, '=').nth(1).unwrap_or("").trim();
+                if let Ok(n) = raw.parse::<i64>() {
+                    Some(serde_json::json!(n))
+                } else if let Ok(n) = raw.parse::<f64>() {
+                    Some(serde_json::json!(n))
+                } else if raw == "true" {
+                    Some(serde_json::json!(true))
+                } else if raw == "false" {
+                    Some(serde_json::json!(false))
+                } else if raw == "null" {
+                    Some(serde_json::Value::Null)
+                } else if raw == "[]" {
+                    Some(serde_json::json!([]))
+                } else if raw == "{}" {
+                    Some(serde_json::json!({}))
+                } else if (raw.starts_with('"') && raw.ends_with('"')) || (raw.starts_with('\'') && raw.ends_with('\'')) {
+                    Some(serde_json::json!(&raw[1..raw.len() - 1]))
+                } else {
+                    // Non-literal default expression (e.g. `new ApplicationConfig()`): leave None so hydrator uses default or mock
+                    None
+                }
             } else {
                 None
             };
@@ -511,6 +599,42 @@ impl TsPrecheckExtractor {
             });
         }
 
+        // 3b. Raw network / socket server binding
+        if body.contains("new Server(")
+            || body.contains(".listen(")
+            || body.contains("http.createServer(")
+            || body.contains("https.createServer(")
+            || body.contains("net.createServer(")
+        {
+            effects.push(DetectedSideEffect {
+                effect_type: "unmockable_side_effect".to_string(),
+                target: "net.listen".to_string(),
+                mockable: false,
+            });
+        }
+
+        // 3c. Non-deterministic RNG / UUID / clock calls
+        if body.contains("Math.random(")
+            || body.contains("getRandomValues(")
+            || body.contains("randomFillSync(")
+            || body.contains("randomBytes(")
+            || body.contains("randomUUID(")
+            || body.contains("randomStringGenerator(")
+            || body.contains("createContextId(")
+            || body.contains("fillRandom(")
+            || body.contains("getRandom(")
+            || body.contains("Date.now(")
+            || body.contains("new Date(")
+            || body.contains("toLocaleString(")
+            || body.contains("uuid(")
+        {
+            effects.push(DetectedSideEffect {
+                effect_type: "rng".to_string(),
+                target: "random".to_string(),
+                mockable: true,
+            });
+        }
+
         // 4. Mockable service calls
         if body.contains("this.") {
             let re = Regex::new(r"this\.(\w+)\.([a-zA-Z0-9_]+)\(").unwrap();
@@ -543,6 +667,64 @@ impl TsPrecheckExtractor {
             }
         }
         throws
+    }
+
+    fn brace_depth_at(source: &str, byte_offset: usize) -> usize {
+        let mut depth = 0usize;
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut in_backtick = false;
+        let mut prev_backslash = false;
+
+        for (i, c) in source.char_indices() {
+            if i >= byte_offset {
+                break;
+            }
+            if prev_backslash {
+                prev_backslash = false;
+                continue;
+            }
+            if (in_single || in_double || in_backtick) && c == '\\' {
+                prev_backslash = true;
+                continue;
+            }
+            if !in_double && !in_backtick && c == '\'' {
+                in_single = !in_single;
+            } else if !in_single && !in_backtick && c == '"' {
+                in_double = !in_double;
+            } else if !in_single && !in_double && c == '`' {
+                in_backtick = !in_backtick;
+            } else if !in_single && !in_double && !in_backtick {
+                if c == '{' {
+                    depth += 1;
+                } else if c == '}' {
+                    depth = depth.saturating_sub(1);
+                }
+            }
+        }
+        depth
+    }
+
+    fn extract_balanced_parens(source: &str) -> Option<String> {
+        let mut depth = 0usize;
+        let mut started = false;
+        let mut start_idx = 0;
+
+        for (i, c) in source.char_indices() {
+            if c == '(' {
+                if !started {
+                    started = true;
+                    start_idx = i;
+                }
+                depth += 1;
+            } else if c == ')' && started {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(source[start_idx + 1..i].to_string());
+                }
+            }
+        }
+        None
     }
 
     fn extract_braced_block(source: &str) -> Option<String> {

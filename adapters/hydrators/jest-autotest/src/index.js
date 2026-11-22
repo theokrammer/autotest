@@ -1,4 +1,6 @@
+const fs = require('fs');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const { Loader } = require('./Loader');
 const { DtoHydrator } = require('./DtoHydrator');
 const { MockBinder } = require('./MockBinder');
@@ -44,13 +46,20 @@ class AutotestHydrator {
 
     // Build mock instances keyed by constructor parameter name
     const mockInstances = {};
+    const primitiveTypes = new Set(['string', 'number', 'boolean', 'any', 'unknown', 'object', 'void', 'null', 'undefined']);
     for (const param of ctorArgs) {
       const matchingMocks = mocks.filter(m => {
         const target = m.target || '';
         return target.startsWith(param.name + '.');
       });
 
-      if (matchingMocks.length > 0) {
+      const paramType = (param.type || param.param_type || '').trim();
+      const needsAutoMock = matchingMocks.length === 0
+        && (param.default_value === null || param.default_value === undefined)
+        && paramType !== ''
+        && !primitiveTypes.has(paramType.toLowerCase());
+
+      if (matchingMocks.length > 0 || needsAutoMock) {
         const { mock, verify } = this.mockBinder.createMock(matchingMocks, classRegistry);
         mockInstances[param.name] = mock;
         // Store verifier for post-invocation
@@ -61,9 +70,12 @@ class AutotestHydrator {
     // Invoke target
     const outcome = await this.targetInvoker.invoke(targetDef, scenarioSpec, mockInstances, classRegistry);
 
-    // Record mode: stage the outcome
+    // Record mode: stage the outcome and skip placeholder assertions
     if (options.record) {
-      this.recorderHook.recordOutcome(scenarioFilePath, targetDef.id, scenarioSpec.name, outcome);
+      const effects = targetDef.detected_side_effects || [];
+      const nonDeterministic = effects.some(e => e.type === 'rng' || e.effect_type === 'rng' || e.type === 'clock_read' || e.effect_type === 'clock_read');
+      this.recorderHook.recordOutcome(scenarioFilePath, targetDef.id, scenarioSpec.name, outcome, { nonDeterministic });
+      return;
     }
 
     // Assert expected
@@ -147,6 +159,7 @@ function createAutotestSuite(scenarioFilePath, classRegistry, options = {}) {
 }
 
 const docCache = new Map();
+const moduleCache = new Map();
 
 /**
  * Execute a single scenario from a scenario file and specification object.
@@ -154,7 +167,7 @@ const docCache = new Map();
  *
  * @param {string} scenarioFilePath - Path to .autotest.json
  * @param {object} scenarioSpec - The scenario definition object (name, inputs, expected, etc.)
- * @param {object} [options] - Optional settings: { expect, classRegistry, record }
+ * @param {object} [options] - Optional settings: { expect, classRegistry, record, loadModule, targetId }
  */
 async function executeAutotestScenario(scenarioFilePath, scenarioSpec, options = {}) {
   const hydrator = new AutotestHydrator();
@@ -166,8 +179,12 @@ async function executeAutotestScenario(scenarioFilePath, scenarioSpec, options =
   }
 
   // Find matching target definition for this scenario
+  const requestedTargetId = options.targetId || scenarioSpec.$target_id || null;
   let matchedTarget = null;
   for (const target of doc.targets || []) {
+    if (requestedTargetId && target.id !== requestedTargetId) {
+      continue;
+    }
     for (const sc of target.scenarios || []) {
       if (sc.name === scenarioSpec.name) {
         matchedTarget = target;
@@ -193,27 +210,51 @@ async function executeAutotestScenario(scenarioFilePath, scenarioSpec, options =
     if (typeof globalThis !== 'undefined' && globalThis[className]) {
       classRegistry[className] = globalThis[className];
     } else if (doc.source && doc.source.file) {
-      const candidates = [
-        path.resolve(path.dirname(resolvedPath), doc.source.file),
+      const candidates = Array.from(new Set([
         path.resolve(process.cwd(), doc.source.file),
+        path.resolve(path.dirname(resolvedPath), doc.source.file),
         path.resolve(process.cwd(), doc.source.file.replace(/\.tsx?$/, '.js')),
-      ];
+      ]));
+      let lastLoadError = null;
       for (const candidate of candidates) {
+        if (!fs.existsSync(candidate)) {
+          continue;
+        }
         try {
-          const mod = require(candidate);
+          let mod = moduleCache.get(candidate);
+          if (!mod) {
+            if (typeof options.loadModule === 'function') {
+              mod = await options.loadModule(candidate);
+            } else {
+              try {
+                mod = require(candidate);
+              } catch (reqErr) {
+                mod = await import(pathToFileURL(candidate).href);
+              }
+            }
+            if (mod) {
+              moduleCache.set(candidate, mod);
+            }
+          }
+          if (!mod) continue;
           if (mod[className]) {
             classRegistry[className] = mod[className];
             break;
-          } else if (typeof mod === 'function' && mod.name === className) {
+          } else if (typeof mod === 'function' && (mod.name === className || parts.length === 1)) {
             classRegistry[className] = mod;
             break;
           } else if (mod.default && (mod.default.name === className || typeof mod.default === 'function')) {
             classRegistry[className] = mod.default;
             break;
           }
-        } catch (_) {
-          // ignore candidate require errors
+        } catch (err) {
+          lastLoadError = err;
         }
+      }
+      if (!classRegistry[className] && lastLoadError) {
+        throw new Error(
+          `Failed to load target "${className}" from ${doc.source.file}: ${lastLoadError.message}`
+        );
       }
     }
   }

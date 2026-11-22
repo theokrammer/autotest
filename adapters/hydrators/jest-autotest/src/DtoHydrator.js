@@ -26,9 +26,34 @@ class DtoHydrator {
           return this.customFactories.get(type)(value);
         }
 
-        // Built-in date codec
+        // Built-in codecs
+        if (type === 'Undefined') {
+          return undefined;
+        }
+        if (type === 'Number') {
+          return Number(value.value);
+        }
+        if (type === 'Buffer') {
+          return Buffer.from(Array.isArray(value.data) ? value.data : []);
+        }
+        if (['Uint8Array', 'Int8Array', 'Uint16Array', 'Int16Array', 'Uint32Array', 'Int32Array', 'Float32Array', 'Float64Array'].includes(type)) {
+          const Ctor = globalThis[type];
+          return new Ctor(Array.isArray(value.data) ? value.data : []);
+        }
         if (type === 'Date' || type === 'DateTimeImmutable') {
           return new Date(value.value || Date.now());
+        }
+        if (type === 'Map') {
+          const entries = Array.isArray(value.entries)
+            ? value.entries.map(([k, v]) => [this.hydrate(k, classRegistry), this.hydrate(v, classRegistry)])
+            : [];
+          return new Map(entries);
+        }
+        if (type === 'Set') {
+          const vals = Array.isArray(value.values)
+            ? value.values.map(v => this.hydrate(v, classRegistry))
+            : [];
+          return new Set(vals);
         }
 
         const TargetClass = classRegistry[type];
@@ -41,14 +66,16 @@ class DtoHydrator {
           return TargetClass[value['$factory']](...ctorArgs);
         }
 
-        // Tier 3: Constructor Instantiation
+        // Tier 3 & 4: Constructor Instantiation or Prototype-Only Property Hydration
         if (TargetClass && typeof TargetClass === 'function') {
-          const ctorArgs = Array.isArray(value['$ctor'])
-            ? value['$ctor'].map(arg => this.hydrate(arg, classRegistry))
-            : [];
-          const instance = new TargetClass(...ctorArgs);
+          let instance;
+          if (Array.isArray(value['$ctor'])) {
+            const ctorArgs = value['$ctor'].map(arg => this.hydrate(arg, classRegistry));
+            instance = new TargetClass(...ctorArgs);
+          } else {
+            instance = Object.create(TargetClass.prototype);
+          }
 
-          // Tier 4: Property Fallback
           if (value['$props'] && typeof value['$props'] === 'object') {
             for (const [k, v] of Object.entries(value['$props'])) {
               instance[k] = this.hydrate(v, classRegistry);
