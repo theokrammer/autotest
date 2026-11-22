@@ -64,12 +64,35 @@ pub struct FixtureException {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct FactorySignature {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<ParameterDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MetadataSeed {
+    pub key: String,
+    pub value: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_param: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_method: Option<String>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TargetDefinition {
     pub id: String,
     pub kind: TargetKind,
     pub signature: SignatureDefinition,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detected_side_effects: Vec<DetectedSideEffect>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata_keys: Vec<String>,
     #[serde(default)]
     pub scenarios: Vec<ScenarioDefinition>,
 }
@@ -90,6 +113,12 @@ pub struct SignatureDefinition {
     pub parameters: Vec<ParameterDefinition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub return_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub static_factories: Vec<FactorySignature>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub implements: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub private_constructor: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -134,6 +163,12 @@ pub struct ScenarioDefinition {
     pub setup_calls: Vec<SetupCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invoke_returned_args: Option<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub factory: Option<SetupCall>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub constructor_overrides: BTreeMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata_seeds: Vec<MetadataSeed>,
     pub inputs: serde_json::Value,
     pub expected: ExpectedOutcome,
 }

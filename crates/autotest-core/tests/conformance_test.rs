@@ -39,6 +39,7 @@ fn create_base_doc(id: &str, file: &str) -> ScenarioDocument {
             kind: TargetKind::Method,
             signature: SignatureDefinition::default(),
             detected_side_effects: Vec::new(),
+            metadata_keys: Vec::new(),
             scenarios: Vec::new(),
         }],
     }
@@ -202,6 +203,9 @@ fn test_conformance_20_to_23_merge_and_drift_detection() {
         mocks: vec![],
         setup_calls: vec![],
         invoke_returned_args: None,
+        factory: None,
+        constructor_overrides: BTreeMap::new(),
+        metadata_seeds: vec![],
         inputs: json!({ "amount": 100.0, "countryCode": "DE" }),
         expected: ExpectedOutcome {
             outcome: OutcomeKind::Return,
@@ -246,6 +250,9 @@ fn test_conformance_20_to_23_merge_and_drift_detection() {
         mocks: vec![],
         setup_calls: vec![],
         invoke_returned_args: None,
+        factory: None,
+        constructor_overrides: BTreeMap::new(),
+        metadata_seeds: vec![],
         inputs: json!({}),
         expected: ExpectedOutcome {
             outcome: OutcomeKind::Return,

@@ -51,8 +51,12 @@ fn create_doc(
                 constructor_args: vec![],
                 parameters,
                 return_type,
+                static_factories: vec![],
+                implements: vec![],
+                private_constructor: false,
             },
             detected_side_effects,
+            metadata_keys: vec![],
             scenarios,
         }],
     }
@@ -111,6 +115,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         }],
                         setup_calls: vec![],
                         invoke_returned_args: None,
+                        factory: None,
+                        constructor_overrides: BTreeMap::new(),
+                        metadata_seeds: vec![],
                         inputs: json!({"country": "DE", "netAmount": 100.0}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -205,6 +212,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         ],
                         setup_calls: vec![],
                         invoke_returned_args: None,
+                        factory: None,
+                        constructor_overrides: BTreeMap::new(),
+                        metadata_seeds: vec![],
                         inputs: json!({"country": "DE", "currency": "USD", "amount": 100.0}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -245,6 +255,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     mocks: vec![],
                     setup_calls: vec![],
                     invoke_returned_args: None,
+                    factory: None,
+                    constructor_overrides: BTreeMap::new(),
+                    metadata_seeds: vec![],
                     inputs: json!({
                         "money": {
                             "$type": "App\\ValueObject\\Money",
@@ -292,6 +305,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     mocks: vec![],
                     setup_calls: vec![],
                     invoke_returned_args: None,
+                    factory: None,
+                    constructor_overrides: BTreeMap::new(),
+                    metadata_seeds: vec![],
                     inputs: json!({
                         "money": {
                             "$type": "App\\ValueObject\\Money",
@@ -341,6 +357,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     mocks: vec![],
                     setup_calls: vec![],
                     invoke_returned_args: None,
+                    factory: None,
+                    constructor_overrides: BTreeMap::new(),
+                    metadata_seeds: vec![],
                     inputs: json!({
                         "profile": {
                             "$type": "App\\DTO\\UserProfile",
@@ -389,6 +408,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     mocks: vec![],
                     setup_calls: vec![],
                     invoke_returned_args: None,
+                    factory: None,
+                    constructor_overrides: BTreeMap::new(),
+                    metadata_seeds: vec![],
                     inputs: json!({"amount": 0.0}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::Return,
@@ -428,6 +450,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     mocks: vec![],
                     setup_calls: vec![],
                     invoke_returned_args: None,
+                    factory: None,
+                    constructor_overrides: BTreeMap::new(),
+                    metadata_seeds: vec![],
                     inputs: json!({"amount": -0.01}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::Exception,
@@ -467,6 +492,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     mocks: vec![],
                     setup_calls: vec![],
                     invoke_returned_args: None,
+                    factory: None,
+                    constructor_overrides: BTreeMap::new(),
+                    metadata_seeds: vec![],
                     inputs: json!({"code": ""}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::Exception,
@@ -506,6 +534,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     mocks: vec![],
                     setup_calls: vec![],
                     invoke_returned_args: None,
+                    factory: None,
+                    constructor_overrides: BTreeMap::new(),
+                    metadata_seeds: vec![],
                     inputs: json!({"countryCode": "DE"}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::Return,
@@ -563,6 +594,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         }],
                         setup_calls: vec![],
                         invoke_returned_args: None,
+                        factory: None,
+                        constructor_overrides: BTreeMap::new(),
+                        metadata_seeds: vec![],
                         inputs: json!({"orderNumber": "ORD-12345"}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -624,6 +658,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         }],
                         setup_calls: vec![],
                         invoke_returned_args: None,
+                        factory: None,
+                        constructor_overrides: BTreeMap::new(),
+                        metadata_seeds: vec![],
                         inputs: json!({"email": "test@example.com"}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -682,6 +719,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         }],
                         setup_calls: vec![],
                         invoke_returned_args: None,
+                        factory: None,
+                        constructor_overrides: BTreeMap::new(),
+                        metadata_seeds: vec![],
                         inputs: json!({"total": 250.0}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -740,6 +780,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         }],
                         setup_calls: vec![],
                         invoke_returned_args: None,
+                        factory: None,
+                        constructor_overrides: BTreeMap::new(),
+                        metadata_seeds: vec![],
                         inputs: json!({"session": {"userId": "usr_99", "role": "admin", "token": "xyz"}}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -799,6 +842,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         }],
                         setup_calls: vec![],
                         invoke_returned_args: None,
+                        factory: None,
+                        constructor_overrides: BTreeMap::new(),
+                        metadata_seeds: vec![],
                         inputs: json!({"count": 3}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -859,6 +905,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         }],
                         setup_calls: vec![],
                         invoke_returned_args: None,
+                        factory: None,
+                        constructor_overrides: BTreeMap::new(),
+                        metadata_seeds: vec![],
                         inputs: json!({"buffer": {"capacity": 1024}}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -917,6 +966,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         }],
                         setup_calls: vec![],
                         invoke_returned_args: None,
+                        factory: None,
+                        constructor_overrides: BTreeMap::new(),
+                        metadata_seeds: vec![],
                         inputs: json!({"orderIds": [101, 102]}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -957,6 +1009,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     mocks: vec![],
                     setup_calls: vec![],
                     invoke_returned_args: None,
+                    factory: None,
+                    constructor_overrides: BTreeMap::new(),
+                    metadata_seeds: vec![],
                     inputs: json!({"id": "MISSING_ID_999"}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::Exception,
@@ -996,6 +1051,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     mocks: vec![],
                     setup_calls: vec![],
                     invoke_returned_args: None,
+                    factory: None,
+                    constructor_overrides: BTreeMap::new(),
+                    metadata_seeds: vec![],
                     inputs: json!({"token": "EXPIRED_TOKEN_ABC"}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::Exception,
@@ -1035,6 +1093,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     mocks: vec![],
                     setup_calls: vec![],
                     invoke_returned_args: None,
+                    factory: None,
+                    constructor_overrides: BTreeMap::new(),
+                    metadata_seeds: vec![],
                     inputs: json!({"payload": {"event": "HEARTBEAT"}}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::NoCrash,
@@ -1074,6 +1135,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     mocks: vec![],
                     setup_calls: vec![],
                     invoke_returned_args: None,
+                    factory: None,
+                    constructor_overrides: BTreeMap::new(),
+                    metadata_seeds: vec![],
                     inputs: json!({"rate": 0.25}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::Return,
@@ -1113,6 +1177,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     mocks: vec![],
                     setup_calls: vec![],
                     invoke_returned_args: None,
+                    factory: None,
+                    constructor_overrides: BTreeMap::new(),
+                    metadata_seeds: vec![],
                     inputs: json!({"param": "deprecated_value"}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::Return,
@@ -1152,6 +1219,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     mocks: vec![],
                     setup_calls: vec![],
                     invoke_returned_args: None,
+                    factory: None,
+                    constructor_overrides: BTreeMap::new(),
+                    metadata_seeds: vec![],
                     inputs: json!({"obsoleteParam": "drift_value"}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::Return,
@@ -1205,6 +1275,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         }],
                         setup_calls: vec![],
                         invoke_returned_args: None,
+                        factory: None,
+                        constructor_overrides: BTreeMap::new(),
+                        metadata_seeds: vec![],
                         inputs: json!({"taskName": "daily_sync"}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -1251,6 +1324,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         mocks: vec![],
                         setup_calls: vec![],
                         invoke_returned_args: None,
+                        factory: None,
+                        constructor_overrides: BTreeMap::new(),
+                        metadata_seeds: vec![],
                         inputs: json!({"amount": 100.0}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -1301,6 +1377,9 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         mocks: vec![],
                         setup_calls: vec![],
                         invoke_returned_args: None,
+                        factory: None,
+                        constructor_overrides: BTreeMap::new(),
+                        metadata_seeds: vec![],
                         inputs: json!({"orderId": "ORD-42"}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,

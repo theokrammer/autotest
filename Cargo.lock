@@ -84,6 +84,7 @@ dependencies = [
  "autotest-sandbox",
  "autotest-ts-precheck",
  "clap",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",
