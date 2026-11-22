@@ -344,6 +344,6 @@ fn test_bridge_scaffolding() {
     assert!(php_bridge.contains("class AutotestBridgeTest"));
 
     let ts_bridge = EntrypointScaffolder::generate_ts_bridge("tests/scenarios", true);
-    assert!(ts_bridge.contains("import { describe, it, expect } from 'vitest';"));
+    assert!(ts_bridge.contains("import { describe, it, expect, vi } from 'vitest';"));
     assert!(ts_bridge.contains("it.each(scenarios)"));
 }

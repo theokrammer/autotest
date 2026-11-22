@@ -97,9 +97,14 @@ final class AutotestBridgeTest extends TestCase
     /// Supports targeted execution via AUTOTEST_FILE and optional AUTOTEST_INDEX env vars.
     pub fn generate_ts_bridge(scenario_dir: &str, is_vitest: bool) -> String {
         let runner_import = if is_vitest {
-            "import { describe, it, expect } from 'vitest';"
+            "import { describe, it, expect, vi } from 'vitest';"
         } else {
             "// Jest globals\n/* global describe, it, expect */"
+        };
+        let load_module_expr = if is_vitest {
+            "(p: string) => vi.importActual(p)"
+        } else {
+            "(p: string) => Promise.resolve(require(p))"
         };
 
         format!(
@@ -140,7 +145,7 @@ function collectScenarios(dir: string, fileFilter?: string, indexFilter?: number
     for (const target of content.targets || []) {{
       for (const scenario of target.scenarios || []) {{
         if (indexFilter === undefined || currentIndex === indexFilter) {{
-          results.push([`[#${{currentIndex}}] ${{target.id}} :: ${{scenario.name}}`, scenario, full]);
+          results.push([`[#${{currentIndex}}] ${{target.id}} :: ${{scenario.name}}`, {{ ...scenario, $target_id: target.id }}, full]);
         }}
         currentIndex++;
       }}
@@ -158,11 +163,99 @@ const scenarios = collectScenarios(scenarioDir, fileFilter, Number.isNaN(indexFi
 
 describe('Autotest Scenarios', () => {{
   it.each(scenarios)('%s', async (_name, scenario, file) => {{
-    await executeAutotestScenario(file, scenario, {{ expect }});
+    await executeAutotestScenario(file, scenario, {{
+      expect,
+      loadModule: {load_module_expr},
+    }});
   }});
 }});
 "#,
             runner_import = runner_import,
+            load_module_expr = load_module_expr,
+            scenario_dir = scenario_dir.trim_start_matches('/')
+        )
+    }
+
+    /// Generates built-in Node.js test runner (`node --test`) ESM bridge
+    /// Supports targeted execution via AUTOTEST_FILE and optional AUTOTEST_INDEX env vars.
+    pub fn generate_node_bridge(scenario_dir: &str) -> String {
+        format!(
+            r#"import {{ describe, it }} from 'node:test';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import {{ createRequire }} from 'node:module';
+import {{ fileURLToPath, pathToFileURL }} from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const require = createRequire(import.meta.url);
+
+let executeAutotestScenario;
+try {{
+  ({{ executeAutotestScenario }} = require('@autotest/jest'));
+}} catch (_) {{
+  const fallback = process.env.AUTOTEST_JS_HYDRATOR || '/tmp/autotest-js-hydrator/index.js';
+  ({{ executeAutotestScenario }} = require(fallback));
+}}
+
+function collectScenarios(dir, fileFilter, indexFilter) {{
+  const files = [];
+  if (fileFilter) {{
+    const projectRoot = path.resolve(__dirname, '..');
+    const candidates = [fileFilter, path.resolve(projectRoot, fileFilter), path.resolve(dir, fileFilter)];
+    const found = candidates.find(c => fs.existsSync(c) && fs.statSync(c).isFile());
+    if (!found) {{
+      throw new Error(`AUTOTEST_FILE not found: ${{fileFilter}}`);
+    }}
+    files.push(found);
+  }} else if (fs.existsSync(dir)) {{
+    function walk(current) {{
+      for (const entry of fs.readdirSync(current, {{ withFileTypes: true }})) {{
+        const full = path.join(current, entry.name);
+        if (entry.isDirectory()) {{
+          walk(full);
+        }} else if (entry.isFile() && entry.name.endsWith('.autotest.json') && !entry.name.endsWith('.staging.json')) {{
+          files.push(full);
+        }}
+      }}
+    }}
+    walk(dir);
+    files.sort();
+  }}
+
+  const results = [];
+  let currentIndex = 0;
+  for (const full of files) {{
+    const content = JSON.parse(fs.readFileSync(full, 'utf-8'));
+    for (const target of content.targets || []) {{
+      for (const scenario of target.scenarios || []) {{
+        if (indexFilter === undefined || currentIndex === indexFilter) {{
+          results.push([`[#${{currentIndex}}] ${{target.id}} :: ${{scenario.name}}`, {{ ...scenario, $target_id: target.id }}, full]);
+        }}
+        currentIndex++;
+      }}
+    }}
+  }}
+  return results;
+}}
+
+const scenarioDir = path.resolve(__dirname, '../{scenario_dir}');
+const fileFilter = process.env.AUTOTEST_FILE || undefined;
+const indexFilter = process.env.AUTOTEST_INDEX !== undefined && process.env.AUTOTEST_INDEX !== ''
+  ? Number.parseInt(process.env.AUTOTEST_INDEX, 10)
+  : undefined;
+const scenarios = collectScenarios(scenarioDir, fileFilter, Number.isNaN(indexFilter) ? undefined : indexFilter);
+
+describe('Autotest Scenarios', () => {{
+  for (const [name, scenario, file] of scenarios) {{
+    it(name, async () => {{
+      await executeAutotestScenario(file, scenario, {{
+        loadModule: (p) => import(pathToFileURL(p).href),
+      }});
+    }});
+  }}
+}});
+"#,
             scenario_dir = scenario_dir.trim_start_matches('/')
         )
     }

@@ -46,6 +46,7 @@ impl SymbolicSolver {
         let mut scenarios = Vec::new();
 
         // 1. Generate happy-path boundary scenario
+        let target_prefix = target.id.replace("::", "_").replace('\\', "_").replace('.', "_");
         let (boundary_inputs, _boundary_name) = self.generate_boundary_inputs(&target.signature.parameters, false);
         scenarios.push(ScenarioDefinition {
             name: format!("{}_boundary_nominal", target.id.replace("::", "_").replace('\\', "_")),
@@ -54,7 +55,7 @@ impl SymbolicSolver {
             stale: false,
             tags: vec!["boundary".to_string(), "happy_path".to_string()],
             mocks: Vec::new(),
-            inputs: Value::Object(boundary_inputs),
+            inputs: Value::Object(boundary_inputs.clone()),
             expected: ExpectedOutcome {
                 outcome: OutcomeKind::Return,
                 expected_type: target.signature.return_type.clone(),
@@ -64,6 +65,28 @@ impl SymbolicSolver {
                 expected_events: Vec::new(),
             },
         });
+
+        // 1b. Generate contrasting boundary scenario (toggles bools, empty/non-empty strings & arrays, 0/positive numbers)
+        let (alt_inputs, _) = self.generate_boundary_inputs(&target.signature.parameters, true);
+        if !alt_inputs.is_empty() && alt_inputs != boundary_inputs {
+            scenarios.push(ScenarioDefinition {
+                name: format!("{}_boundary_alt", target_prefix),
+                mode: ScenarioMode::SymbolicContract,
+                locked: false,
+                stale: false,
+                tags: vec!["boundary".to_string(), "branch_coverage".to_string()],
+                mocks: Vec::new(),
+                inputs: Value::Object(alt_inputs),
+                expected: ExpectedOutcome {
+                    outcome: OutcomeKind::Return,
+                    expected_type: target.signature.return_type.clone(),
+                    value: target.signature.return_type.as_deref().map(default_return_for_type),
+                    exception_type: None,
+                    message_contains: None,
+                    expected_events: Vec::new(),
+                },
+            });
+        }
 
         // 2. Generate guard-clause / negative test scenarios for constrained parameters
         for param in &target.signature.parameters {
@@ -104,12 +127,17 @@ impl SymbolicSolver {
         scenarios
     }
 
-    fn generate_boundary_inputs(&self, params: &[ParameterDefinition], _upper: bool) -> (Map<String, Value>, String) {
+    fn generate_boundary_inputs(&self, params: &[ParameterDefinition], alt: bool) -> (Map<String, Value>, String) {
         let mut map = Map::new();
         for p in params {
-            map.insert(p.name.clone(), default_valid_for_param(p));
+            let val = if alt {
+                alt_boundary_for_param(p)
+            } else {
+                default_valid_for_param(p)
+            };
+            map.insert(p.name.clone(), val);
         }
-        (map, "nominal".to_string())
+        (map, if alt { "alt" } else { "nominal" }.to_string())
     }
 }
 
@@ -125,20 +153,102 @@ fn default_valid_for_param(param: &ParameterDefinition) -> Value {
     }
 
     let t = param.param_type.to_lowercase();
+    let n = param.name.to_lowercase();
     let _has_finite = param.constraints.iter().any(|c| c == "finite");
     let has_non_neg = param.constraints.iter().any(|c| c.contains(">= 0") || c.contains("> 0"));
     let has_len_2 = param.constraints.iter().any(|c| c.contains("length == 2") || c.contains("len == 2"));
 
-    if t.contains("float") || t.contains("double") {
+    if t.ends_with("[]") || t.starts_with("array<") || t == "array" || (t.starts_with("readonly ") && t.ends_with("[]")) {
+        json!([])
+    } else if t.contains("float") || t.contains("double") {
         if has_non_neg { json!(0.0) } else { json!(1.0) }
     } else if t.contains("int") || t.contains("number") {
-        if has_non_neg { json!(0) } else { json!(1) }
+        if n.contains("port") {
+            json!(0)
+        } else if has_non_neg {
+            json!(0)
+        } else {
+            json!(1)
+        }
     } else if t.contains("string") {
-        if has_len_2 { json!("DE") } else { json!("test") }
+        if has_len_2 {
+            json!("DE")
+        } else if n.contains("alphabet") {
+            json!("abcdef0123456789")
+        } else {
+            json!("test")
+        }
     } else if t.contains("bool") {
         json!(true)
-    } else {
+    } else if t == "any" {
+        if n.contains("alphabet") {
+            json!("abcdef0123456789")
+        } else if n.contains("size") || n.contains("bytes") || n.contains("length") || n.contains("count") || n.contains("limit") {
+            json!(16)
+        } else if n.contains("port") {
+            json!(0)
+        } else if n.contains("name") || n.contains("path") || n.contains("url") || n.contains("key") || n.contains("pattern") || n.contains("prefix") || n.contains("host") {
+            json!("test")
+        } else {
+            json!({})
+        }
+    } else if t == "null"
+        || t == "undefined"
+        || t == "void"
+        || t == "mixed"
+        || t.starts_with('?')
+        || t.contains("| null")
+        || t.contains("|null")
+        || t.contains("| undefined")
+        || t.contains("function")
+        || t.contains("=>")
+    {
         json!(null)
+    } else {
+        json!({})
+    }
+}
+
+fn alt_boundary_for_param(param: &ParameterDefinition) -> Value {
+    let t = param.param_type.to_lowercase();
+    let n = param.name.to_lowercase();
+
+    if t.ends_with("[]") || t.starts_with("array<") || t == "array" || (t.starts_with("readonly ") && t.ends_with("[]")) {
+        if t.contains("number") || t.contains("int") {
+            json!([1])
+        } else {
+            json!(["test"])
+        }
+    } else if t.contains("float") || t.contains("double") {
+        json!(0.0)
+    } else if t.contains("int") || t.contains("number") {
+        if n.contains("port") {
+            json!(0)
+        } else {
+            json!(0)
+        }
+    } else if t.contains("string") {
+        if n.contains("alphabet") {
+            json!("abcde")
+        } else if n.contains("host") {
+            json!("example.com/")
+        } else if n.contains("pattern") || n.contains("path") {
+            json!("/users/{id}")
+        } else {
+            json!("")
+        }
+    } else if t.contains("bool") {
+        json!(false)
+    } else if t == "any" {
+        if n.contains("alphabet") {
+            json!("abcde")
+        } else if n.contains("size") || n.contains("bytes") || n.contains("length") || n.contains("count") || n.contains("limit") {
+            json!(0)
+        } else {
+            default_valid_for_param(param)
+        }
+    } else {
+        default_valid_for_param(param)
     }
 }
 
