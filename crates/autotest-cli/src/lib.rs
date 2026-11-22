@@ -187,11 +187,17 @@ pub fn handle_init(dir: &Path, vendor: bool) -> anyhow::Result<()> {
             if let Ok(pkg_str) = fs::read_to_string(dir.join("package.json")) {
                 if pkg_str.contains("\"vitest\"") {
                     ts_cfg.test_framework = "vitest".to_string();
+                    ts_cfg.bridge_file = detect_ts_bridge_file(dir);
                 } else if pkg_str.contains("\"jest\"") {
                     ts_cfg.test_framework = "jest".to_string();
+                    ts_cfg.bridge_file = detect_ts_bridge_file(dir);
+                } else {
+                    ts_cfg.test_framework = "node".to_string();
+                    ts_cfg.bridge_file = "tests/autotest.bridge.test.mjs".to_string();
                 }
+            } else {
+                ts_cfg.bridge_file = detect_ts_bridge_file(dir);
             }
-            ts_cfg.bridge_file = detect_ts_bridge_file(dir);
         }
     }
 
@@ -260,14 +266,18 @@ pub fn handle_sync_tests(dir: &Path) -> anyhow::Result<()> {
 
     if should_run_language(dir, "typescript") {
         if let Some(ts_cfg) = config.languages.get("typescript") {
-            let is_vitest = ts_cfg.test_framework.to_lowercase() == "vitest";
-            let bridge_code = EntrypointScaffolder::generate_ts_bridge(&config.project.scenario_dir, is_vitest);
+            let fw = ts_cfg.test_framework.to_lowercase();
+            let bridge_code = if fw == "node" {
+                EntrypointScaffolder::generate_node_bridge(&config.project.scenario_dir)
+            } else {
+                EntrypointScaffolder::generate_ts_bridge(&config.project.scenario_dir, fw == "vitest")
+            };
             let bridge_path = dir.join(&ts_cfg.bridge_file);
             if let Some(parent) = bridge_path.parent() {
                 fs::create_dir_all(parent)?;
             }
             fs::write(&bridge_path, bridge_code)?;
-            println!("Generated TypeScript bridge: {}", bridge_path.display());
+            println!("Generated TypeScript/JS bridge: {}", bridge_path.display());
         }
     }
 
@@ -391,6 +401,9 @@ pub fn handle_generate(
                     || path_str.contains("/build/")
                     || path_str.contains("/coverage/")
                     || path_str.contains("/.git/")
+                    || path_str.contains("/test/")
+                    || path_str.contains("/tests/")
+                    || path_str.contains("/__tests__/")
                 {
                     continue;
                 }
@@ -440,6 +453,15 @@ pub fn handle_generate(
                         continue;
                     }
                 };
+
+                // Skip executable CLI scripts (shebang)
+                if content.starts_with("#!") {
+                    skipped_by_reason
+                        .entry("executable CLI script (shebang)")
+                        .or_default()
+                        .push(rel_path_str.to_string());
+                    continue;
+                }
 
                 let extraction_result = if is_ts {
                     autotest_ts_precheck::TsPrecheckExtractor::extract_source(&rel_path_str, &content)
@@ -740,9 +762,40 @@ fn has_scenarios_for_language(scenario_dir: &Path, lang_name: &str) -> bool {
     false
 }
 
+fn prepare_embedded_js_hydrator() -> anyhow::Result<PathBuf> {
+    let hydrator_dir = std::env::temp_dir().join("autotest-js-hydrator");
+    fs::create_dir_all(&hydrator_dir)?;
+
+    let files: &[(&str, &str)] = &[
+        ("Loader.js", include_str!("../../../adapters/hydrators/jest-autotest/src/Loader.js")),
+        ("DtoHydrator.js", include_str!("../../../adapters/hydrators/jest-autotest/src/DtoHydrator.js")),
+        ("MockBinder.js", include_str!("../../../adapters/hydrators/jest-autotest/src/MockBinder.js")),
+        ("TargetInvoker.js", include_str!("../../../adapters/hydrators/jest-autotest/src/TargetInvoker.js")),
+        ("OutcomeAsserter.js", include_str!("../../../adapters/hydrators/jest-autotest/src/OutcomeAsserter.js")),
+        ("RecorderHook.js", include_str!("../../../adapters/hydrators/jest-autotest/src/RecorderHook.js")),
+        ("index.js", include_str!("../../../adapters/hydrators/jest-autotest/src/index.js")),
+    ];
+
+    for (name, content) in files {
+        fs::write(hydrator_dir.join(name), content)?;
+    }
+
+    Ok(hydrator_dir.join("index.js"))
+}
+
 fn prepare_vitest_bridge_config(dir: &Path, bridge_file: &str) -> anyhow::Result<PathBuf> {
     let config_path = std::env::temp_dir().join("autotest.vitest.config.mjs");
     let escaped_bridge = serde_json::to_string(bridge_file)?;
+
+    // Ensure @autotest/jest resolves even if not installed (or broken symlink) in target node_modules
+    let needs_alias = !dir.join("node_modules/@autotest/jest/package.json").is_file();
+    let alias_entry = if needs_alias {
+        let embedded = prepare_embedded_js_hydrator()?;
+        let escaped_hydrator = serde_json::to_string(&embedded.to_string_lossy().to_string())?;
+        format!(r#""@autotest/jest": {}"#, escaped_hydrator)
+    } else {
+        String::new()
+    };
 
     let existing_candidates = [
         "vitest.config.ts",
@@ -770,9 +823,18 @@ export default async (env) => {{
     ? await userConfigExport(env)
     : (userConfigExport || {{}});
   const baseTest = base.test || {{}};
+  const baseResolve = base.resolve || {{}};
+  const baseAlias = baseResolve.alias || {{}};
   const existingInclude = Array.isArray(baseTest.include) ? baseTest.include : [];
+  const mergedAlias = Array.isArray(baseAlias)
+    ? [...baseAlias{array_alias}]
+    : {{ ...baseAlias, {alias_entry} }};
   return {{
     ...base,
+    resolve: {{
+      ...baseResolve,
+      alias: mergedAlias,
+    }},
     test: {{
       ...baseTest,
       include: Array.from(new Set([...existingInclude, {escaped_bridge}])),
@@ -781,12 +843,23 @@ export default async (env) => {{
 }};
 "#,
             escaped_import = escaped_import,
-            escaped_bridge = escaped_bridge
+            escaped_bridge = escaped_bridge,
+            alias_entry = alias_entry,
+            array_alias = if needs_alias {
+                let embedded = prepare_embedded_js_hydrator()?;
+                format!(
+                    ", {{ find: \"@autotest/jest\", replacement: {} }}",
+                    serde_json::to_string(&embedded.to_string_lossy().to_string())?
+                )
+            } else {
+                String::new()
+            }
         )
     } else {
         format!(
-            "export default {{\n  test: {{\n    include: [{}],\n  }},\n}};\n",
-            escaped_bridge
+            "export default {{\n  resolve: {{\n    alias: {{ {alias_entry} }},\n  }},\n  test: {{\n    include: [{escaped_bridge}],\n  }},\n}};\n",
+            alias_entry = alias_entry,
+            escaped_bridge = escaped_bridge
         )
     };
 
@@ -820,8 +893,12 @@ pub fn handle_record_execution(dir: &Path, config: &AutotestConfig) -> anyhow::R
         if !bridge_path.exists() {
             println!("Generating missing test bridge for {}: {}", lang_name, lang_cfg.bridge_file);
             let bridge_code = if lang_name == "typescript" || lang_name == "javascript" {
-                let is_vitest = lang_cfg.test_framework.to_lowercase() == "vitest";
-                EntrypointScaffolder::generate_ts_bridge(&config.project.scenario_dir, is_vitest)
+                let fw = lang_cfg.test_framework.to_lowercase();
+                if fw == "node" {
+                    EntrypointScaffolder::generate_node_bridge(&config.project.scenario_dir)
+                } else {
+                    EntrypointScaffolder::generate_ts_bridge(&config.project.scenario_dir, fw == "vitest")
+                }
             } else {
                 EntrypointScaffolder::generate_phpunit_bridge(&config.project.scenario_dir)
             };
@@ -836,10 +913,22 @@ pub fn handle_record_execution(dir: &Path, config: &AutotestConfig) -> anyhow::R
         let local_vitest = dir.join("node_modules/.bin/vitest");
         let local_jest = dir.join("node_modules/.bin/jest");
         let local_phpunit = dir.join("vendor/bin/phpunit");
+        let mut extra_env_owned: Vec<(String, String)> = vec![("AUTOTEST_RECORD".to_string(), "1".to_string())];
 
         let (program, args): (String, Vec<String>) = match lang_name.as_str() {
             "typescript" | "javascript" => {
-                if lang_cfg.test_framework.to_lowercase() == "vitest" {
+                let fw = lang_cfg.test_framework.to_lowercase();
+                if fw == "node" {
+                    let embedded = prepare_embedded_js_hydrator()?;
+                    extra_env_owned.push((
+                        "AUTOTEST_JS_HYDRATOR".to_string(),
+                        embedded.to_string_lossy().to_string(),
+                    ));
+                    (
+                        "node".to_string(),
+                        vec!["--test".to_string(), lang_cfg.bridge_file.clone()],
+                    )
+                } else if fw == "vitest" {
                     let vitest_cfg = prepare_vitest_bridge_config(dir, &lang_cfg.bridge_file)?;
                     let vitest_cfg_str = vitest_cfg.to_string_lossy().to_string();
                     if local_vitest.exists() {
@@ -912,8 +1001,11 @@ pub fn handle_record_execution(dir: &Path, config: &AutotestConfig) -> anyhow::R
         };
 
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let envs = [("AUTOTEST_RECORD", "1")];
-        match sandbox_runner.run_command_with_env(&program, &arg_refs, dir, &envs) {
+        let env_refs: Vec<(&str, &str)> = extra_env_owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        match sandbox_runner.run_command_with_env(&program, &arg_refs, dir, &env_refs) {
             Ok(result) => {
                 println!(
                     "  Execution completed in {:?} (exit code: {:?})",
