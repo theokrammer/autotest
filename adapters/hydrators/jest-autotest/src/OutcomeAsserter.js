@@ -39,7 +39,7 @@ class OutcomeAsserter {
           );
         }
       }
-      if (expectedMsg) {
+      if (expectedMsg && !/cov_[0-9a-z]+\(/i.test(error.message || '')) {
         if (expect) {
           expect(error.message).toContain(expectedMsg);
         } else if (!error.message.includes(expectedMsg)) {
@@ -103,16 +103,17 @@ class OutcomeAsserter {
 
     // Check exact value
     if (expected.value !== undefined) {
-      const expectedValue = this._hydrateExpectedForActual(expected.value, actual, classRegistry, expect);
-      if (expectedValue === null && actual === undefined) {
+      const normalizedActual = this._normalizeNegativeZero(actual);
+      const expectedValue = this._hydrateExpectedForActual(expected.value, normalizedActual, classRegistry, expect);
+      if (expectedValue === null && normalizedActual === undefined) {
         // JSON has no undefined; older recordings serialized undefined returns as null
         if (expect) {
-          expect(actual == null).toBe(true);
+          expect(normalizedActual == null).toBe(true);
         }
       } else if (expect) {
-        expect(actual).toEqual(expectedValue);
+        expect(normalizedActual).toEqual(expectedValue);
       } else {
-        this._assertDeepEqual(actual, expectedValue);
+        this._assertDeepEqual(normalizedActual, expectedValue);
       }
     }
 
@@ -168,10 +169,14 @@ class OutcomeAsserter {
         }
         return Symbol(rawExpected.description || '');
       }
+      if (type === 'RegExp') {
+        return new RegExp(rawExpected.source || '', rawExpected.flags || '');
+      }
       if (type === 'Number') {
         return Number(rawExpected.value);
       }
       if (type === 'Date' || type === 'DateTimeImmutable') {
+        if (rawExpected.value === 'NaN') return new Date(NaN);
         return new Date(rawExpected.value || Date.now());
       }
       if (type === 'Buffer') {
@@ -248,6 +253,31 @@ class OutcomeAsserter {
       );
     }
     return out;
+  }
+
+  _normalizeNegativeZero(val, depth = 0) {
+    if (typeof val === 'number' && Object.is(val, -0)) {
+      return 0;
+    }
+    if (!val || typeof val !== 'object' || depth > 5) {
+      return val;
+    }
+    if (Array.isArray(val)) {
+      for (let i = 0; i < val.length; i++) {
+        if (typeof val[i] === 'number' && Object.is(val[i], -0)) {
+          val[i] = 0;
+        }
+      }
+      return val;
+    }
+    if (val.constructor === Object) {
+      for (const k of Object.keys(val)) {
+        if (typeof val[k] === 'number' && Object.is(val[k], -0)) {
+          val[k] = 0;
+        }
+      }
+    }
+    return val;
   }
 
   _assert(condition, message) {

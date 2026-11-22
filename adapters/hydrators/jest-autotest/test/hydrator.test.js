@@ -274,5 +274,30 @@ console.log('  Loader $ref resolution tests passed');
   assert.strictEqual(new decorated().handle(), 'ok');
   console.log('  Recursive Proxy + DecoratedClass tests passed');
 
+  // === Test RegExp round-trip, Symbol-keyed opaque object, and timestamp non-determinism ===
+  const rxHydrated = dtoHydrator.hydrate({ $type: 'RegExp', source: '^foo\\d+$', flags: 'gi' });
+  assert(rxHydrated instanceof RegExp);
+  assert.strictEqual(rxHydrated.source, '^foo\\d+$');
+  assert.strictEqual(rxHydrated.flags, 'gi');
+  outcomeAsserter.assert({ result: /^foo\d+$/gi, error: null }, {
+    outcome: 'return',
+    value: { $type: 'RegExp', source: '^foo\\d+$', flags: 'gi' },
+  }, {}, null);
+
+  const symObj = { css: 'body{}', [Symbol('RAW')]: true };
+  const tmpRecFile = path.join(require('os').tmpdir(), `autotest-rec-test-${process.pid}.autotest.json`);
+  recorder.recordOutcome(tmpRecFile, 'css.raw', 'sym_test', { result: symObj, error: null });
+  recorder.recordOutcome(tmpRecFile, 'dt.now', 'ts_test', {
+    result: { iso: new Date().toISOString() },
+    error: null,
+  });
+  const stagedEntries = recorder.stagingEntries.get(tmpRecFile);
+  assert.strictEqual(stagedEntries[0].expected.type, 'object');
+  assert.strictEqual(stagedEntries[0].expected.value, undefined);
+  assert.strictEqual(stagedEntries[1].expected.type, 'Object');
+  assert.strictEqual(stagedEntries[1].expected.value, undefined);
+  recorder.stagingEntries.clear();
+  console.log('  RegExp, Symbol-opaque & wall-clock timestamp tests passed');
+
   console.log('\nAll @autotest/jest hydrator tests passed!');
 })();

@@ -263,7 +263,7 @@ impl TsPrecheckExtractor {
             let mut static_factories: Vec<FactorySignature> = Vec::new();
             let mut public_properties = Vec::new();
             let mut private_properties = Vec::new();
-            let mut methods = Vec::new();
+            let mut methods: Vec<TsMethodMetadata> = Vec::new();
             let mut requires_fallback = false;
 
             // Check for complex TypeScript types requiring fallback to Compiler API
@@ -356,13 +356,14 @@ impl TsPrecheckExtractor {
                 }
             }
 
-            // Extract Methods (depth-0 class members only, capturing all modifiers)
+            // Extract Methods (depth-0 class members only, capturing all modifiers, with balanced parens & multi-line generics)
             let method_re = Regex::new(
-                r"(?m)^\s*((?:(?:public|private|protected|static|async|readonly|override|abstract|get|set)\s+)*)(\w+)\s*(?:<[^>]+>)?\s*\(([^)]*)\)\s*(?::\s*([^\{;\n]+))?\s*\{"
+                r"(?m)^\s*((?:(?:public|private|protected|static|async|readonly|override|abstract|get|set)\s+)*)(\w+)\s*(?:<[^;{]+?>)?\s*\("
             ).unwrap();
 
             for m_cap in method_re.captures_iter(&class_body) {
-                let match_start = m_cap.get(0).unwrap().start();
+                let full_match = m_cap.get(0).unwrap();
+                let match_start = full_match.start();
                 if Self::brace_depth_at(&class_body, match_start) != 0 {
                     continue;
                 }
@@ -384,22 +385,21 @@ impl TsPrecheckExtractor {
                     continue;
                 }
 
+                let open_paren_idx = full_match.end() - 1;
+                let Some((raw_params, return_type, body_brace_idx)) =
+                    Self::extract_signature_from_paren(&class_body, open_paren_idx)
+                else {
+                    continue;
+                };
+
                 let is_static = modifiers.contains("static");
                 let is_async = modifiers.contains("async");
                 let is_public = !modifiers.contains("private") && !modifiers.contains("protected");
 
-                if methods.iter().any(|m: &TsMethodMetadata| m.name == method_name && m.is_static == is_static) {
-                    continue;
-                }
-
-                let raw_params = &m_cap[3];
-                let return_type = m_cap.get(4).map(|m| m.as_str().trim().to_string());
-
-                let mut parameters = Self::parse_parameters(raw_params);
+                let mut parameters = Self::parse_parameters(&raw_params);
 
                 // Find method body to check side effects, branch literals, and throws
-                let method_start = m_cap.get(0).unwrap().end();
-                let method_body = Self::extract_braced_block(&class_body[method_start - 1..])
+                let method_body = Self::extract_braced_block(&class_body[body_brace_idx..])
                     .unwrap_or_default();
 
                 Self::extract_branch_constraints(&method_body, &mut parameters);
@@ -428,8 +428,8 @@ impl TsPrecheckExtractor {
                 let throws = Self::detect_throws(&method_body);
                 let metadata_keys = Self::extract_metadata_keys(&method_body);
 
-                methods.push(TsMethodMetadata {
-                    name: method_name,
+                let meta = TsMethodMetadata {
+                    name: method_name.clone(),
                     is_static,
                     is_public,
                     is_async,
@@ -438,7 +438,12 @@ impl TsPrecheckExtractor {
                     detected_side_effects,
                     metadata_keys,
                     throws,
-                });
+                };
+                if let Some(existing) = methods.iter_mut().find(|m| m.name == method_name && m.is_static == is_static) {
+                    *existing = meta;
+                } else {
+                    methods.push(meta);
+                }
             }
 
             classes.push(TsClassMetadata {
@@ -456,25 +461,29 @@ impl TsPrecheckExtractor {
         }
 
         // Extract Top-Level / Standalone Functions (depth-0 only)
-        let mut functions = Vec::new();
+        let mut functions: Vec<TsFunctionMetadata> = Vec::new();
 
         // 1. function declarations: export (default )?(async )?function name(...)
         let fn_decl_re = Regex::new(
-            r"(?m)^\s*(export\s+(?:default\s+)?)?(?:async\s+)?function(?:\s+(\w+))?\s*(?:<[^>]+>)?\s*\(([^)]*)\)\s*(?::\s*([^\{;\n]+))?\s*\{"
+            r"(?m)^\s*(export\s+(?:default\s+)?)?(?:async\s+)?function(?:\s+(\w+))?\s*(?:<[^;{]+?>)?\s*\("
         ).unwrap();
 
         for f_cap in fn_decl_re.captures_iter(&clean_source) {
-            if Self::brace_depth_at(&clean_source, f_cap.get(0).unwrap().start()) != 0 {
+            let full_match = f_cap.get(0).unwrap();
+            if Self::brace_depth_at(&clean_source, full_match.start()) != 0 {
                 continue;
             }
+            let open_paren_idx = full_match.end() - 1;
+            let Some((raw_params, ret_type, body_brace_idx)) =
+                Self::extract_signature_from_paren(&clean_source, open_paren_idx)
+            else {
+                continue;
+            };
             let is_exported = f_cap.get(1).is_some();
             let fn_name = f_cap.get(2).map_or("default", |m| m.as_str()).to_string();
-            let raw_params = &f_cap[3];
-            let ret_type = f_cap.get(4).map(|m| m.as_str().trim().to_string());
 
-            let mut parameters = Self::parse_parameters(raw_params);
-            let fn_start = f_cap.get(0).unwrap().end();
-            let fn_body = Self::extract_braced_block(&clean_source[fn_start - 1..]).unwrap_or_default();
+            let mut parameters = Self::parse_parameters(&raw_params);
+            let fn_body = Self::extract_braced_block(&clean_source[body_brace_idx..]).unwrap_or_default();
             Self::extract_branch_constraints(&fn_body, &mut parameters);
             let mut detected_side_effects = Self::detect_side_effects(&fn_body);
             if fn_name.to_lowercase().contains("random")
@@ -489,16 +498,21 @@ impl TsPrecheckExtractor {
             let throws = Self::detect_throws(&fn_body);
             let metadata_keys = Self::extract_metadata_keys(&fn_body);
 
-            functions.push(TsFunctionMetadata {
-                name: fn_name,
+            let meta = TsFunctionMetadata {
+                name: fn_name.clone(),
                 is_exported,
-                is_async: f_cap.get(0).map_or(false, |m| m.as_str().contains("async")),
+                is_async: full_match.as_str().contains("async"),
                 parameters,
                 return_type: ret_type,
                 detected_side_effects,
                 metadata_keys,
                 throws,
-            });
+            };
+            if let Some(existing) = functions.iter_mut().find(|f| f.name == fn_name) {
+                *existing = meta;
+            } else {
+                functions.push(meta);
+            }
         }
 
         // 2. arrow / expression assignments: export const/let/var name = (async )?(...) => ...
@@ -1039,6 +1053,72 @@ impl TsPrecheckExtractor {
         None
     }
 
+    /// Given `source` and the byte offset of the opening `(` of a function/method parameter list,
+    /// returns `(raw_params_inside_parens, optional_return_type, body_open_brace_offset)`.
+    /// Returns `None` for TypeScript overload declarations that end with `;` instead of a `{ ... }` body.
+    fn extract_signature_from_paren(
+        source: &str,
+        open_paren_offset: usize,
+    ) -> Option<(String, Option<String>, usize)> {
+        let params_str = Self::extract_balanced_parens(&source[open_paren_offset..])?;
+        let after_close = open_paren_offset + params_str.len() + 2;
+        if after_close > source.len() {
+            return None;
+        }
+        let rest = &source[after_close..];
+        let bytes = rest.as_bytes();
+        let mut depth_brace = 0usize;
+        let mut depth_paren = 0usize;
+        let mut depth_angle = 0usize;
+        let mut depth_bracket = 0usize;
+        let mut last_non_ws = b')';
+        let mut i = 0usize;
+
+        while i < bytes.len() {
+            let b = bytes[i];
+            if depth_brace == 0 && depth_paren == 0 && depth_angle == 0 && depth_bracket == 0 {
+                if b == b';' {
+                    return None;
+                }
+                if b == b'{' {
+                    // If preceded by `:`, `|`, `&`, or `=`, this `{` starts an inline object type in the return type
+                    if matches!(last_non_ws, b':' | b'|' | b'&' | b'=') {
+                        depth_brace += 1;
+                        last_non_ws = b;
+                        i += 1;
+                        continue;
+                    }
+                    let raw_ret = rest[..i].trim();
+                    let ret_type = raw_ret
+                        .strip_prefix(':')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    return Some((params_str, ret_type, after_close + i));
+                }
+            }
+            match b {
+                b'{' => depth_brace += 1,
+                b'}' => depth_brace = depth_brace.saturating_sub(1),
+                b'(' => depth_paren += 1,
+                b')' => depth_paren = depth_paren.saturating_sub(1),
+                b'[' => depth_bracket += 1,
+                b']' => depth_bracket = depth_bracket.saturating_sub(1),
+                b'<' => depth_angle += 1,
+                b'>' => {
+                    if i == 0 || bytes[i - 1] != b'=' {
+                        depth_angle = depth_angle.saturating_sub(1);
+                    }
+                }
+                _ => {}
+            }
+            if !b.is_ascii_whitespace() {
+                last_non_ws = b;
+            }
+            i += 1;
+        }
+        None
+    }
+
     fn extract_braced_block(source: &str) -> Option<String> {
         let mut depth = 0;
         let mut started = false;
@@ -1413,5 +1493,30 @@ mod tests {
         let meta_param = &t.signature.parameters[0];
         assert!(meta_param.constraints.contains(&"prop:ctrlPath".to_string()));
         assert!(meta_param.constraints.contains(&"prop_arr:modulePath".to_string()));
+    }
+
+    #[test]
+    fn test_ts_overloads_and_inline_object_param_types() {
+        let code = r#"
+            export function partial<T extends object>(schema: T): T;
+            export function partial<T extends object, M extends { [K in keyof T]?: true }>(schema: T, mask: M): T;
+            export function partial(schema: any, mask?: any) {
+                return schema;
+            }
+
+            export function useContainer(iocContainer: { get(someClass: any): any }, options?: UseContainerOptions): void {
+                return;
+            }
+        "#;
+        let doc = TsPrecheckExtractor::extract_source("src/overloads.ts", code).unwrap();
+        assert_eq!(doc.targets.len(), 2);
+        let partial_targets: Vec<_> = doc.targets.iter().filter(|t| t.id == "partial").collect();
+        assert_eq!(partial_targets.len(), 1);
+        assert_eq!(partial_targets[0].signature.parameters.len(), 2);
+
+        let uc = doc.targets.iter().find(|t| t.id == "useContainer").unwrap();
+        assert_eq!(uc.signature.parameters.len(), 2);
+        assert_eq!(uc.signature.parameters[0].name, "iocContainer");
+        assert_eq!(uc.signature.parameters[0].param_type, "{ get(someClass: any): any }");
     }
 }

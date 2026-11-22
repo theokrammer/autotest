@@ -79,6 +79,9 @@ class DtoHydrator {
           const returnSpec = value.returns;
           return (..._args) => this.hydrate(returnSpec, classRegistry);
         }
+        if (type === 'RegExp') {
+          return new RegExp(value.source || '', value.flags || '');
+        }
         if (type === 'Undefined') {
           return undefined;
         }
@@ -93,6 +96,7 @@ class DtoHydrator {
           return new Ctor(Array.isArray(value.data) ? value.data : []);
         }
         if (type === 'Date' || type === 'DateTimeImmutable') {
+          if (value.value === 'NaN') return new Date(NaN);
           return new Date(value.value || Date.now());
         }
         if (type === 'Map') {

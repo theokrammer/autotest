@@ -139,6 +139,11 @@ class MockBinder {
 
         const fn = (..._args) => {
           const kl = key.toLowerCase();
+          if (key === 'get' && typeof _args[0] === 'function') {
+            try {
+              return new _args[0]();
+            } catch (_) {}
+          }
           if (key === 'values' || key === 'keys' || key === 'entries') {
             return [][Symbol.iterator]();
           }

@@ -1248,8 +1248,11 @@ fn synthesize_value_for_type(
         return json!({});
     }
 
-    // Unindexed non-primitive PHP/TS class/interface name -> AutoMock
-    if t.contains('\\') || t.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+    // Unindexed non-primitive PHP/TS class/interface name or inline structural object with methods -> AutoMock
+    if t.contains('\\')
+        || t.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+        || (t.starts_with('{') && t.contains('('))
+    {
         return json!({ "$type": "AutoMock", "class": t.trim_start_matches('\\') });
     }
 

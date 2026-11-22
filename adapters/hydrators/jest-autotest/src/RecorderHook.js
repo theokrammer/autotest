@@ -32,17 +32,20 @@ class RecorderHook {
     };
 
     if (outcome.error) {
+      const rawMsg = outcome.error.message || '';
+      // Coverage instrumentation (istanbul `cov_xxx()`) leaks into error messages: don't assert on those
+      const safeMsg = /cov_[0-9a-z]+\(/i.test(rawMsg) ? '' : rawMsg;
       entry.expected = {
         outcome: 'exception',
         exception_type: outcome.error.constructor ? outcome.error.constructor.name : 'Error',
-        message_contains: outcome.error.message || '',
+        message_contains: safeMsg,
       };
     } else if (typeof outcome.result === 'function') {
       entry.expected = {
         outcome: 'return',
         type: 'function',
       };
-    } else if (options.nonDeterministic) {
+    } else if (options.nonDeterministic || this._hasRecentTimestamp(outcome.result)) {
       const res = outcome.result;
       const resType = (res !== null && res !== undefined && typeof res === 'object' && res.constructor)
         ? res.constructor.name
@@ -53,7 +56,7 @@ class RecorderHook {
       };
     } else if (this._isOpaqueRuntimeObject(outcome.result)) {
       const ctorName = outcome.result.constructor && outcome.result.constructor.name;
-      const safeType = (!ctorName || /^[0-9a-f]{12,}$/i.test(ctorName)) ? 'object' : ctorName;
+      const safeType = (!ctorName || ctorName === 'Object' || /^[0-9a-f]{12,}$/i.test(ctorName)) ? 'object' : ctorName;
       entry.expected = {
         outcome: 'return',
         type: safeType,
@@ -151,23 +154,91 @@ class RecorderHook {
     return true;
   }
 
+  _hasRecentTimestamp(result) {
+    if (result === null || result === undefined) {
+      return false;
+    }
+    const now = Date.now();
+    if (typeof result === 'number') {
+      return Math.abs(now - result) < 2 * 60 * 60 * 1000;
+    }
+    let json;
+    if (typeof result === 'string') {
+      json = result;
+    } else if (typeof result === 'object') {
+      try {
+        json = JSON.stringify(this._serializeValue(result));
+      } catch (_) {
+        return false;
+      }
+    } else {
+      return false;
+    }
+    if (!json) return false;
+    // 1. ISO-8601 timestamps within +-24h of Date.now()
+    const reIso = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g;
+    let m;
+    while ((m = reIso.exec(json)) !== null) {
+      const t = Date.parse(m[0]);
+      if (!Number.isNaN(t) && Math.abs(now - t) < 24 * 60 * 60 * 1000) {
+        return true;
+      }
+    }
+    // 2. Epoch millisecond numbers inside serialized values within +-2h of Date.now() (e.g. Luxon DateTime.ts)
+    const reEpoch = /\b(1[7-9]\d{11})\b/g;
+    while ((m = reEpoch.exec(json)) !== null) {
+      const ts = Number(m[1]);
+      if (Math.abs(now - ts) < 2 * 60 * 60 * 1000) {
+        return true;
+      }
+    }
+    // 3. Formatted current date/time strings (e.g. date-fns formatISO, intlFormat, formatRFC7231, toLocaleString, toLocaleTimeString)
+    const nowDate = new Date(now);
+    const isoDay = nowDate.toISOString().slice(0, 10);
+    const localTime = nowDate.toTimeString().slice(0, 8);
+    const utcTime = nowDate.toISOString().slice(11, 19);
+    const localeDate = nowDate.toLocaleDateString('en-US');
+    if (
+      json.includes(isoDay)
+      || json.includes(localTime)
+      || json.includes(utcTime)
+      || json.includes(localeDate)
+      || /\b\d{1,2}:\d{2}:\d{2}\s*(?:AM|PM)\b/i.test(json)
+    ) {
+      return true;
+    }
+    return false;
+  }
+
   _isOpaqueRuntimeObject(value) {
     if (
       !value
       || typeof value !== 'object'
       || Array.isArray(value)
       || value instanceof Date
+      || value instanceof RegExp
       || Buffer.isBuffer(value)
       || ArrayBuffer.isView(value)
       || value instanceof Error
     ) {
       return false;
     }
+    if (value === globalThis) {
+      return true;
+    }
     if (utilTypes.isProxy(value)) {
       return true;
     }
+    const HOST_CLASSES = new Set([
+      'URLSearchParams', 'URL', 'Request', 'Response', 'Headers', 'FormData', 'Blob', 'File',
+      'ReadableStream', 'WritableStream', 'TransformStream', 'ReadableStreamDefaultReader',
+      'WritableStreamDefaultWriter', 'AbortController', 'AbortSignal', 'EventTarget',
+    ]);
     const ctorName = value.constructor && value.constructor.name;
-    if (ctorName && /^[0-9a-f]{12,}$/i.test(ctorName)) {
+    if (ctorName && (HOST_CLASSES.has(ctorName) || /^[0-9a-f]{12,}$/i.test(ctorName))) {
+      return true;
+    }
+    if (Object.getOwnPropertySymbols(value).length > 0) {
       return true;
     }
     if (ctorName === 'Object' || value.constructor === Map || value.constructor === Set) {
@@ -175,9 +246,6 @@ class RecorderHook {
     }
     // Subclasses of Map/Set (e.g. NestJS ModulesContainer extends Map) are opaque runtime containers
     if (value instanceof Map || value instanceof Set) {
-      return true;
-    }
-    if (Object.getOwnPropertySymbols(value).length > 0) {
       return true;
     }
     const keys = Object.keys(value);
@@ -189,12 +257,16 @@ class RecorderHook {
       if (
         typeof prop === 'function'
         || prop === value
-        || (prop instanceof Map && prop.constructor !== Map)
-        || (prop instanceof Set && prop.constructor !== Set)
+        || (prop instanceof Map && (prop.constructor !== Map || prop.size > 16))
+        || (prop instanceof Set && (prop.constructor !== Set || prop.size > 16))
       ) {
         return true;
       }
       if (prop && typeof prop === 'object' && !Array.isArray(prop)) {
+        const pName = prop.constructor && prop.constructor.name;
+        if (pName && HOST_CLASSES.has(pName)) {
+          return true;
+        }
         for (const subKey of Object.keys(prop)) {
           if (typeof prop[subKey] === 'function') {
             return true;
@@ -211,14 +283,22 @@ class RecorderHook {
     if (typeof value === 'function') return { $type: 'Function' };
     if (typeof value === 'symbol') return { $type: 'Symbol', description: value.description || '' };
     if (typeof value === 'bigint') return value.toString();
-    if (typeof value === 'number' && !Number.isFinite(value)) {
-      return { $type: 'Number', value: String(value) };
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value)) {
+        return { $type: 'Number', value: String(value) };
+      }
+      if (Object.is(value, -0)) {
+        return 0;
+      }
     }
     if (typeof value !== 'object') return value;
     if (depth > 8 || seen.has(value)) return null;
 
     if (value instanceof Date) {
-      return { $type: 'Date', value: value.toISOString() };
+      return { $type: 'Date', value: Number.isNaN(value.getTime()) ? 'NaN' : value.toISOString() };
+    }
+    if (value instanceof RegExp) {
+      return { $type: 'RegExp', source: value.source, flags: value.flags };
     }
     if (Buffer.isBuffer(value)) {
       return { $type: 'Buffer', data: Array.from(value) };
