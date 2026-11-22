@@ -36,7 +36,7 @@ fn default_mode() -> String {
     "os_native".to_string()
 }
 fn default_timeout() -> u64 {
-    500
+    10_000
 }
 fn default_true() -> bool {
     true

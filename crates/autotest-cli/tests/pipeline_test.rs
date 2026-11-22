@@ -316,3 +316,123 @@ fn test_verify_detects_stale_scenarios() {
     let res = handle_verify(dir);
     assert!(res.is_err(), "Verify must fail when stale scenarios exist");
 }
+
+#[test]
+fn test_generate_from_root_js_library_like_nanoid() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    // No src/ directory, root-level .js files with standalone exported functions
+    fs::write(dir.join("package.json"), r#"{"name": "nanoid"}"#).unwrap();
+    fs::write(
+        dir.join("index.js"),
+        r#"
+export let nanoid = (size = 21) => {
+  return "x".repeat(size);
+};
+
+export function customAlphabet(alphabet, defaultSize = 21) {
+  return (size = defaultSize) => alphabet.slice(0, size);
+}
+"#,
+    )
+    .unwrap();
+
+    handle_init(dir, false).unwrap();
+    handle_generate(dir, false, false, false, true).unwrap();
+
+    let scenario_path = dir.join("tests/scenarios/index.autotest.json");
+    assert!(scenario_path.exists(), "Scenario file should be generated for root index.js");
+
+    let doc: ScenarioDocument =
+        serde_json::from_str(&fs::read_to_string(&scenario_path).unwrap()).unwrap();
+    assert_eq!(doc.targets.len(), 2, "Both nanoid and customAlphabet should be extracted");
+    assert!(doc.targets.iter().all(|t| !t.scenarios.is_empty()));
+}
+
+#[test]
+fn test_generate_from_monorepo_nestjs_style() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    // Monorepo without root src/, using packages/core/src and NestJS decorators
+    fs::write(dir.join("package.json"), r#"{"name": "nest"}"#).unwrap();
+    let pkg_src = dir.join("packages/core/src");
+    fs::create_dir_all(&pkg_src).unwrap();
+    fs::write(
+        pkg_src.join("cats.controller.ts"),
+        r#"
+@Controller('cats')
+export class CatsController {
+    constructor(@Inject('CATS') private readonly catsService: CatsService) {}
+
+    @Get(':id')
+    public findOne(@Param('id') id: string): string {
+        return this.catsService.findOne(id);
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    handle_init(dir, false).unwrap();
+    handle_generate(dir, false, false, false, true).unwrap();
+
+    let scenario_path = dir.join("tests/scenarios/packages/core/src/cats.controller.autotest.json");
+    assert!(
+        scenario_path.exists(),
+        "Scenario file should be generated for monorepo package source"
+    );
+
+    let doc: ScenarioDocument =
+        serde_json::from_str(&fs::read_to_string(&scenario_path).unwrap()).unwrap();
+    assert_eq!(doc.targets.len(), 1);
+    assert_eq!(doc.targets[0].id, "CatsController.findOne");
+    assert_eq!(doc.targets[0].signature.parameters[0].name, "id");
+    assert!(!doc.targets[0].scenarios.is_empty());
+}
+
+#[test]
+fn test_php_standalone_record_and_approve_without_phpunit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    fs::write(dir.join("composer.json"), r#"{"name": "example/router"}"#).unwrap();
+    let src_dir = dir.join("src");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(
+        src_dir.join("Router.php"),
+        r#"<?php
+declare(strict_types=1);
+
+namespace Example;
+
+class Router {
+    public function normalizePath(string $path): string {
+        return '/' . trim($path, '/');
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    handle_init(dir, false).unwrap();
+    let cfg = AutotestConfig::load_from_dir(dir).unwrap();
+    assert!(cfg.languages.contains_key("php"));
+    assert!(!cfg.languages.contains_key("typescript"), "PHP-only project should not include typescript");
+
+    // Run generate + record using standalone PHP fallback (no phpunit/vendor needed)
+    handle_generate(dir, false, false, true, true).unwrap();
+
+    let staging_path = dir.join("tests/scenarios/Router.autotest.staging.json");
+    assert!(staging_path.exists(), "Standalone PHP runner should create staging file");
+
+    let entries = StagingManager::read_staging(&staging_path).unwrap();
+    assert!(!entries.is_empty(), "At least one PHP scenario outcome should be recorded");
+    assert_eq!(entries[0].expected["outcome"], "return");
+    assert_eq!(entries[0].expected["value"], "/test");
+
+    // Approve staged outcomes into main scenario file
+    handle_approve(dir, None).unwrap();
+    assert!(!staging_path.exists(), "Staging file should be removed after approve");
+}

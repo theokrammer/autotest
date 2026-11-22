@@ -85,7 +85,7 @@ impl Default for AutotestConfig {
             languages,
             sandbox: SandboxSection {
                 mode: "os_native".to_string(),
-                timeout_ms: 500,
+                timeout_ms: 10_000,
                 block_network: true,
                 allow_temp_fs_only: true,
             },

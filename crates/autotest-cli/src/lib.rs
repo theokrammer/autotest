@@ -89,6 +89,64 @@ pub fn run_cli(cli: Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn detect_source_roots(dir: &Path) -> Vec<String> {
+    let mut roots = Vec::new();
+
+    // 1. Monorepo pattern: packages/*/src or packages/*
+    let packages_dir = dir.join("packages");
+    if packages_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&packages_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let p = entry.path();
+                if p.is_dir() {
+                    let pkg_name = entry.file_name().to_string_lossy().to_string();
+                    if p.join("src").is_dir() {
+                        roots.push(format!("packages/{}/src", pkg_name));
+                    } else if p.join("lib").is_dir() {
+                        roots.push(format!("packages/{}/lib", pkg_name));
+                    } else {
+                        roots.push(format!("packages/{}", pkg_name));
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Standard "src" directory
+    if dir.join("src").is_dir() {
+        roots.push("src".to_string());
+    }
+
+    // 3. Standard "lib" directory
+    if dir.join("lib").is_dir() && !roots.iter().any(|r| r == "src") {
+        roots.push("lib".to_string());
+    }
+
+    // 4. Fallback to root "." if source files exist at root
+    if roots.is_empty() {
+        if let Ok(entries) = fs::read_dir(dir) {
+            let has_root_sources = entries.filter_map(|e| e.ok()).any(|e| {
+                let p = e.path();
+                if p.is_file() {
+                    let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+                    ["ts", "tsx", "js", "mjs", "php"].contains(&ext)
+                } else {
+                    false
+                }
+            });
+            if has_root_sources {
+                roots.push(".".to_string());
+            }
+        }
+    }
+
+    if roots.is_empty() {
+        roots.push("src".to_string());
+    }
+
+    roots
+}
+
 pub fn handle_init(dir: &Path, vendor: bool) -> anyhow::Result<()> {
     let mut config = if dir.join("autotest.toml").exists() {
         AutotestConfig::load_from_dir(dir)?
@@ -100,12 +158,41 @@ pub fn handle_init(dir: &Path, vendor: bool) -> anyhow::Result<()> {
     }
 
     // Detect project files
+    let has_composer = dir.join("composer.json").exists();
+    let has_package_json = dir.join("package.json").exists();
     let mut detected = Vec::new();
-    if dir.join("composer.json").exists() {
+    if has_composer {
         detected.push("PHP (composer.json)");
+        if !has_package_json {
+            config.languages.remove("typescript");
+        }
+        if let Some(php_cfg) = config.languages.get_mut("php") {
+            if dir.join("src").exists() {
+                php_cfg.source_roots = vec!["src".to_string()];
+            } else if dir.join("app").exists() {
+                php_cfg.source_roots = vec!["app".to_string()];
+            }
+        }
     }
-    if dir.join("package.json").exists() {
+    if has_package_json {
         detected.push("TypeScript/JavaScript (package.json)");
+        if !has_composer {
+            config.languages.remove("php");
+        }
+        if let Some(ts_cfg) = config.languages.get_mut("typescript") {
+            let detected_roots = detect_source_roots(dir);
+            if !detected_roots.is_empty() {
+                ts_cfg.source_roots = detected_roots;
+            }
+            if let Ok(pkg_str) = fs::read_to_string(dir.join("package.json")) {
+                if pkg_str.contains("\"vitest\"") {
+                    ts_cfg.test_framework = "vitest".to_string();
+                } else if pkg_str.contains("\"jest\"") {
+                    ts_cfg.test_framework = "jest".to_string();
+                }
+            }
+            ts_cfg.bridge_file = detect_ts_bridge_file(dir);
+        }
     }
 
     config.save_to_dir(dir)?;
@@ -119,33 +206,101 @@ pub fn handle_init(dir: &Path, vendor: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn detect_ts_bridge_file(dir: &Path) -> String {
+    let config_candidates = [
+        "vitest.config.ts",
+        "vitest.config.mts",
+        "vitest.config.js",
+        "vitest.config.mjs",
+        "vite.config.ts",
+        "jest.config.ts",
+        "jest.config.js",
+        "jest.config.mjs",
+        "package.json",
+    ];
+    for candidate in &config_candidates {
+        let path = dir.join(candidate);
+        if let Ok(content) = fs::read_to_string(&path) {
+            if content.contains(".spec.") && !content.contains(".test.") {
+                return "tests/autotest.bridge.spec.ts".to_string();
+            }
+        }
+    }
+    "tests/autotest.bridge.test.ts".to_string()
+}
+
+fn should_run_language(dir: &Path, lang_name: &str) -> bool {
+    let has_composer = dir.join("composer.json").exists();
+    let has_package_json = dir.join("package.json").exists();
+    if lang_name == "php" && !has_composer && has_package_json {
+        return false;
+    }
+    if (lang_name == "typescript" || lang_name == "javascript") && !has_package_json && has_composer {
+        return false;
+    }
+    true
+}
+
 pub fn handle_sync_tests(dir: &Path) -> anyhow::Result<()> {
     let config = AutotestConfig::load_from_dir(dir)?;
     let tests_dir = dir.join("tests");
     fs::create_dir_all(&tests_dir)?;
 
-    if let Some(php_cfg) = config.languages.get("php") {
-        let bridge_code = EntrypointScaffolder::generate_phpunit_bridge(&config.project.scenario_dir);
-        let bridge_path = dir.join(&php_cfg.bridge_file);
-        if let Some(parent) = bridge_path.parent() {
-            fs::create_dir_all(parent)?;
+    if should_run_language(dir, "php") {
+        if let Some(php_cfg) = config.languages.get("php") {
+            let bridge_code = EntrypointScaffolder::generate_phpunit_bridge(&config.project.scenario_dir);
+            let bridge_path = dir.join(&php_cfg.bridge_file);
+            if let Some(parent) = bridge_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&bridge_path, bridge_code)?;
+            println!("Generated PHPUnit bridge: {}", bridge_path.display());
         }
-        fs::write(&bridge_path, bridge_code)?;
-        println!("Generated PHPUnit bridge: {}", bridge_path.display());
     }
 
-    if let Some(ts_cfg) = config.languages.get("typescript") {
-        let is_vitest = ts_cfg.test_framework.to_lowercase() == "vitest";
-        let bridge_code = EntrypointScaffolder::generate_ts_bridge(&config.project.scenario_dir, is_vitest);
-        let bridge_path = dir.join(&ts_cfg.bridge_file);
-        if let Some(parent) = bridge_path.parent() {
-            fs::create_dir_all(parent)?;
+    if should_run_language(dir, "typescript") {
+        if let Some(ts_cfg) = config.languages.get("typescript") {
+            let is_vitest = ts_cfg.test_framework.to_lowercase() == "vitest";
+            let bridge_code = EntrypointScaffolder::generate_ts_bridge(&config.project.scenario_dir, is_vitest);
+            let bridge_path = dir.join(&ts_cfg.bridge_file);
+            if let Some(parent) = bridge_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&bridge_path, bridge_code)?;
+            println!("Generated TypeScript bridge: {}", bridge_path.display());
         }
-        fs::write(&bridge_path, bridge_code)?;
-        println!("Generated TypeScript bridge: {}", bridge_path.display());
     }
 
     Ok(())
+}
+
+fn classify_empty_source(content: &str, is_php: bool) -> &'static str {
+    if is_php {
+        let has_class = content.contains("class ");
+        if !has_class && content.contains("interface ") {
+            "interface only (not directly executable)"
+        } else if !has_class && content.contains("trait ") {
+            "trait only (not directly executable)"
+        } else if !has_class && content.contains("enum ") {
+            "enum only (no testable methods)"
+        } else if content.contains("abstract class ") {
+            "abstract class (no concrete public methods)"
+        } else if has_class {
+            "class with no public non-magic methods (e.g. exception/DTO/marker class)"
+        } else {
+            "no extractable classes or functions"
+        }
+    } else if !content.contains("class ") && !content.contains("function ") && !content.contains("=>") {
+        if content.contains("interface ") || content.contains("type ") {
+            "type/interface definitions only"
+        } else if content.contains("export *") || content.contains("export {") {
+            "re-export / barrel file"
+        } else {
+            "no extractable public classes or functions"
+        }
+    } else {
+        "no extractable public classes or functions"
+    }
 }
 
 pub fn handle_generate(
@@ -174,6 +329,9 @@ pub fn handle_generate(
     let mut all_stale = Vec::new();
     let mut processed_scenario_files: HashSet<PathBuf> = HashSet::new();
     let mut total_source_files = 0;
+    let mut total_scanned_files = 0;
+    let mut skipped_by_reason: std::collections::BTreeMap<&'static str, Vec<String>> =
+        std::collections::BTreeMap::new();
 
     let solver = SymbolicSolver::new(SolverConfig {
         max_depth: config.solver.max_depth,
@@ -182,7 +340,28 @@ pub fn handle_generate(
 
     // 1. Scan configured source roots for each language and extract targets
     for (lang_name, lang_cfg) in &config.languages {
-        for root in &lang_cfg.source_roots {
+        if !should_run_language(dir, lang_name) {
+            continue;
+        }
+        let mut roots_to_scan = lang_cfg.source_roots.clone();
+        let any_exists = roots_to_scan.iter().any(|r| dir.join(r).exists());
+        if !any_exists {
+            let discovered = detect_source_roots(dir);
+            if !discovered.is_empty() && discovered.iter().any(|r| dir.join(r).exists()) {
+                println!(
+                    "Notice: Configured source_roots {:?} not found for {}. Auto-detected source roots: {:?}",
+                    roots_to_scan, lang_name, discovered
+                );
+                roots_to_scan = discovered;
+            } else {
+                println!(
+                    "Warning: Configured source_roots {:?} for {} do not exist in {}",
+                    roots_to_scan, lang_name, dir.display()
+                );
+            }
+        }
+
+        for root in &roots_to_scan {
             let root_path = dir.join(root);
             if !root_path.exists() {
                 continue;
@@ -200,11 +379,28 @@ pub fn handle_generate(
                 let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
                 let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
 
-                // Skip non-source, test files, and common dependency dirs
+                let rel_path = path.strip_prefix(dir).unwrap_or(path);
+                let rel_path_str = rel_path.to_string_lossy();
+
+                // Skip non-source, test files, and common dependency/build dirs
                 let path_str = path.to_string_lossy();
                 if path_str.contains("/node_modules/")
                     || path_str.contains("/vendor/")
                     || path_str.contains("/target/")
+                    || path_str.contains("/dist/")
+                    || path_str.contains("/build/")
+                    || path_str.contains("/coverage/")
+                    || path_str.contains("/.git/")
+                {
+                    continue;
+                }
+
+                // Skip test & scenario directories when scanning project root "."
+                if root == "."
+                    && (rel_path_str.starts_with("tests/")
+                        || rel_path_str.starts_with("test/")
+                        || rel_path_str.starts_with("__tests__/")
+                        || rel_path_str.starts_with(&config.project.scenario_dir))
                 {
                     continue;
                 }
@@ -216,11 +412,12 @@ pub fn handle_generate(
                     }
                 }
 
-                let is_ts = lang_name == "typescript"
-                    && (ext == "ts" || ext == "tsx")
+                let is_ts = (lang_name == "typescript" || lang_name == "javascript")
+                    && (ext == "ts" || ext == "tsx" || ext == "js" || ext == "mjs" || ext == "cjs")
                     && !file_name.ends_with(".d.ts")
                     && !file_name.contains(".test.")
-                    && !file_name.contains(".spec.");
+                    && !file_name.contains(".spec.")
+                    && !file_name.contains(".min.");
 
                 let is_php = lang_name == "php"
                     && ext == "php"
@@ -230,16 +427,19 @@ pub fn handle_generate(
                     continue;
                 }
 
+                total_scanned_files += 1;
+
                 let content = match fs::read_to_string(path) {
                     Ok(c) => c,
                     Err(e) => {
                         tracing::warn!("Failed to read {}: {}", path.display(), e);
+                        skipped_by_reason
+                            .entry("unreadable file")
+                            .or_default()
+                            .push(rel_path_str.to_string());
                         continue;
                     }
                 };
-
-                let rel_path = path.strip_prefix(dir).unwrap_or(path);
-                let rel_path_str = rel_path.to_string_lossy();
 
                 let extraction_result = if is_ts {
                     autotest_ts_precheck::TsPrecheckExtractor::extract_source(&rel_path_str, &content)
@@ -253,11 +453,20 @@ pub fn handle_generate(
                     Ok(doc) => doc,
                     Err(e) => {
                         tracing::warn!("Extraction error for {}: {}", rel_path_str, e);
+                        skipped_by_reason
+                            .entry("parse/extraction error")
+                            .or_default()
+                            .push(rel_path_str.to_string());
                         continue;
                     }
                 };
 
                 if extracted_doc.targets.is_empty() {
+                    let reason = classify_empty_source(&content, is_php);
+                    skipped_by_reason
+                        .entry(reason)
+                        .or_default()
+                        .push(rel_path_str.to_string());
                     continue;
                 }
 
@@ -265,9 +474,13 @@ pub fn handle_generate(
 
                 // Determine target .autotest.json path in scenario_dir
                 // Example: src/order/OrderService.ts with root "src" -> tests/scenarios/order/OrderService.autotest.json
-                let rel_from_root = path.strip_prefix(&root_path).unwrap_or(rel_path);
-                let rel_without_ext = rel_from_root.with_extension("");
-                let scenario_filename = format!("{}.autotest.json", rel_without_ext.display());
+                let scenario_filename = if root == "." || root.starts_with("packages/") {
+                    format!("{}.autotest.json", rel_path.with_extension("").display())
+                } else {
+                    let rel_from_root = path.strip_prefix(&root_path).unwrap_or(rel_path);
+                    let rel_without_ext = rel_from_root.with_extension("");
+                    format!("{}.autotest.json", rel_without_ext.display())
+                };
                 let target_scenario_path = scenario_dir.join(scenario_filename);
 
                 if let Some(parent) = target_scenario_path.parent() {
@@ -364,9 +577,29 @@ pub fn handle_generate(
     }
 
     println!(
-        "Generated: {} scenarios added across {} source files, {} locked scenarios preserved",
-        total_added, total_source_files, total_locked
+        "Generated: {} scenarios added across {} source files (out of {} scanned), {} locked scenarios preserved",
+        total_added, total_source_files, total_scanned_files, total_locked
     );
+
+    if !skipped_by_reason.is_empty() {
+        let total_skipped: usize = skipped_by_reason.values().map(|v| v.len()).sum();
+        println!("Skipped {} source files with no testable targets:", total_skipped);
+        for (reason, files) in &skipped_by_reason {
+            let preview: Vec<&str> = files.iter().take(3).map(|s| s.as_str()).collect();
+            let suffix = if files.len() > 3 {
+                format!(", ... (+{} more)", files.len() - 3)
+            } else {
+                String::new()
+            };
+            println!(
+                "  - {}: {} ({}{})",
+                reason,
+                files.len(),
+                preview.join(", "),
+                suffix
+            );
+        }
+    }
 
     if !all_stale.is_empty() {
         println!("\n⚠ Veraltete kuratierte Assertions (locked: true):");
@@ -383,6 +616,184 @@ pub fn handle_generate(
     Ok(())
 }
 
+fn prepare_standalone_php_runner() -> anyhow::Result<PathBuf> {
+    let runner_dir = std::env::temp_dir().join("autotest-php-runner");
+    fs::create_dir_all(&runner_dir)?;
+
+    let files: &[(&str, &str)] = &[
+        ("Loader.php", include_str!("../../../adapters/hydrators/phpunit-autotest/src/Loader.php")),
+        ("DtoHydrator.php", include_str!("../../../adapters/hydrators/phpunit-autotest/src/DtoHydrator.php")),
+        ("MockBinder.php", include_str!("../../../adapters/hydrators/phpunit-autotest/src/MockBinder.php")),
+        ("TargetInvoker.php", include_str!("../../../adapters/hydrators/phpunit-autotest/src/TargetInvoker.php")),
+        ("OutcomeAsserter.php", include_str!("../../../adapters/hydrators/phpunit-autotest/src/OutcomeAsserter.php")),
+        ("RecorderHook.php", include_str!("../../../adapters/hydrators/phpunit-autotest/src/RecorderHook.php")),
+        ("AutotestHydrator.php", include_str!("../../../adapters/hydrators/phpunit-autotest/src/AutotestHydrator.php")),
+    ];
+
+    for (name, content) in files {
+        fs::write(runner_dir.join(name), content)?;
+    }
+
+    let runner_script = r#"<?php
+declare(strict_types=1);
+
+$projectDir = getcwd();
+$scenarioDir = $argv[1] ?? ($projectDir . '/tests/scenarios');
+
+if (file_exists($projectDir . '/vendor/autoload.php')) {
+    require_once $projectDir . '/vendor/autoload.php';
+}
+
+require_once __DIR__ . '/Loader.php';
+require_once __DIR__ . '/DtoHydrator.php';
+require_once __DIR__ . '/MockBinder.php';
+require_once __DIR__ . '/TargetInvoker.php';
+require_once __DIR__ . '/OutcomeAsserter.php';
+require_once __DIR__ . '/RecorderHook.php';
+require_once __DIR__ . '/AutotestHydrator.php';
+
+$hydrator = new \Autotest\Hydrator\AutotestHydrator();
+$dummyTestCase = new class {
+    public function assertEquals($expected, $actual): void {}
+};
+
+if (!is_dir($scenarioDir)) {
+    fwrite(STDERR, "Scenario directory not found: {$scenarioDir}\n");
+    exit(1);
+}
+
+$iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($scenarioDir));
+$recordedCount = 0;
+$errorCount = 0;
+
+foreach ($iterator as $file) {
+    if (!$file->isFile()) continue;
+    $path = $file->getPathname();
+    if (!str_ends_with($path, '.autotest.json') || str_ends_with($path, '.staging.json')) {
+        continue;
+    }
+
+    $data = json_decode((string)file_get_contents($path), true);
+    if (!is_array($data)) continue;
+
+    $sourceFile = $data['source']['file'] ?? null;
+    if ($sourceFile) {
+        $fullSource = $projectDir . '/' . ltrim($sourceFile, '/');
+        if (file_exists($fullSource)) {
+            require_once $fullSource;
+        }
+    }
+
+    foreach ($data['targets'] ?? [] as $target) {
+        foreach ($target['scenarios'] ?? [] as $scenario) {
+            try {
+                $hydrator->executeScenario($path, $scenario, $dummyTestCase, [
+                    'record' => true,
+                    'target_id' => $target['id'] ?? null,
+                ]);
+                $recordedCount++;
+            } catch (\Throwable $e) {
+                $errorCount++;
+                fwrite(STDERR, "[autotest] {$target['id']} :: {$scenario['name']}: {$e->getMessage()}\n");
+            }
+        }
+    }
+}
+
+echo "Recorded {$recordedCount} scenarios ({$errorCount} errors)\n";
+"#;
+
+    let run_path = runner_dir.join("run.php");
+    fs::write(&run_path, runner_script)?;
+    Ok(run_path)
+}
+
+fn has_scenarios_for_language(scenario_dir: &Path, lang_name: &str) -> bool {
+    if !scenario_dir.exists() {
+        return false;
+    }
+    for entry in walkdir::WalkDir::new(scenario_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.is_file() && path.to_string_lossy().ends_with(".autotest.json") {
+            if let Ok(content) = fs::read_to_string(path) {
+                if let Ok(doc) = serde_json::from_str::<ScenarioDocument>(&content) {
+                    let src = doc.source.file.to_lowercase();
+                    let is_php = src.ends_with(".php");
+                    let is_ts = src.ends_with(".ts")
+                        || src.ends_with(".tsx")
+                        || src.ends_with(".js")
+                        || src.ends_with(".mjs")
+                        || src.ends_with(".cjs");
+                    if lang_name == "php" && is_php {
+                        return true;
+                    }
+                    if (lang_name == "typescript" || lang_name == "javascript") && is_ts {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn prepare_vitest_bridge_config(dir: &Path, bridge_file: &str) -> anyhow::Result<PathBuf> {
+    let config_path = std::env::temp_dir().join("autotest.vitest.config.mjs");
+    let escaped_bridge = serde_json::to_string(bridge_file)?;
+
+    let existing_candidates = [
+        "vitest.config.ts",
+        "vitest.config.mts",
+        "vitest.config.js",
+        "vitest.config.mjs",
+        "vite.config.ts",
+        "vite.config.mts",
+        "vite.config.js",
+        "vite.config.mjs",
+    ];
+    let existing_cfg = existing_candidates
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|p| p.is_file());
+
+    let content = if let Some(user_cfg_path) = existing_cfg {
+        let abs = user_cfg_path.canonicalize().unwrap_or(user_cfg_path);
+        let escaped_import = serde_json::to_string(&abs.to_string_lossy().to_string())?;
+        format!(
+            r#"import userConfigExport from {escaped_import};
+
+export default async (env) => {{
+  const base = typeof userConfigExport === "function"
+    ? await userConfigExport(env)
+    : (userConfigExport || {{}});
+  const baseTest = base.test || {{}};
+  const existingInclude = Array.isArray(baseTest.include) ? baseTest.include : [];
+  return {{
+    ...base,
+    test: {{
+      ...baseTest,
+      include: Array.from(new Set([...existingInclude, {escaped_bridge}])),
+    }},
+  }};
+}};
+"#,
+            escaped_import = escaped_import,
+            escaped_bridge = escaped_bridge
+        )
+    } else {
+        format!(
+            "export default {{\n  test: {{\n    include: [{}],\n  }},\n}};\n",
+            escaped_bridge
+        )
+    };
+
+    fs::write(&config_path, content)?;
+    Ok(config_path)
+}
+
 pub fn handle_record_execution(dir: &Path, config: &AutotestConfig) -> anyhow::Result<()> {
     println!("\nRecording execution outcomes in OS sandbox...");
     let sandbox_runner = autotest_sandbox::SandboxRunner::new(autotest_sandbox::SandboxConfig {
@@ -396,12 +807,19 @@ pub fn handle_record_execution(dir: &Path, config: &AutotestConfig) -> anyhow::R
     let mut total_staged_entries = 0;
 
     for (lang_name, lang_cfg) in &config.languages {
+        if !should_run_language(dir, lang_name) {
+            continue;
+        }
+        if !has_scenarios_for_language(&scenario_dir, lang_name) {
+            continue;
+        }
+
         let bridge_path = dir.join(&lang_cfg.bridge_file);
 
         // Ensure bridge file exists
         if !bridge_path.exists() {
             println!("Generating missing test bridge for {}: {}", lang_name, lang_cfg.bridge_file);
-            let bridge_code = if lang_name == "typescript" {
+            let bridge_code = if lang_name == "typescript" || lang_name == "javascript" {
                 let is_vitest = lang_cfg.test_framework.to_lowercase() == "vitest";
                 EntrypointScaffolder::generate_ts_bridge(&config.project.scenario_dir, is_vitest)
             } else {
@@ -415,39 +833,113 @@ pub fn handle_record_execution(dir: &Path, config: &AutotestConfig) -> anyhow::R
 
         println!("Running {} test runner in sandbox (record mode)...", lang_name);
 
-        let (program, args): (&str, Vec<&str>) = match lang_name.as_str() {
-            "typescript" => {
+        let local_vitest = dir.join("node_modules/.bin/vitest");
+        let local_jest = dir.join("node_modules/.bin/jest");
+        let local_phpunit = dir.join("vendor/bin/phpunit");
+
+        let (program, args): (String, Vec<String>) = match lang_name.as_str() {
+            "typescript" | "javascript" => {
                 if lang_cfg.test_framework.to_lowercase() == "vitest" {
-                    ("npx", vec!["vitest", "run", &lang_cfg.bridge_file])
+                    let vitest_cfg = prepare_vitest_bridge_config(dir, &lang_cfg.bridge_file)?;
+                    let vitest_cfg_str = vitest_cfg.to_string_lossy().to_string();
+                    if local_vitest.exists() {
+                        (
+                            local_vitest.to_string_lossy().to_string(),
+                            vec![
+                                "run".to_string(),
+                                "--config".to_string(),
+                                vitest_cfg_str,
+                                lang_cfg.bridge_file.clone(),
+                            ],
+                        )
+                    } else {
+                        (
+                            "npx".to_string(),
+                            vec![
+                                "--no-install".to_string(),
+                                "vitest".to_string(),
+                                "run".to_string(),
+                                "--config".to_string(),
+                                vitest_cfg_str,
+                                lang_cfg.bridge_file.clone(),
+                            ],
+                        )
+                    }
                 } else {
-                    ("npx", vec!["jest", &lang_cfg.bridge_file])
+                    let jest_match = format!("<rootDir>/{}", lang_cfg.bridge_file.trim_start_matches('/'));
+                    if local_jest.exists() {
+                        (
+                            local_jest.to_string_lossy().to_string(),
+                            vec![
+                                "--testMatch".to_string(),
+                                jest_match,
+                                lang_cfg.bridge_file.clone(),
+                            ],
+                        )
+                    } else {
+                        (
+                            "npx".to_string(),
+                            vec![
+                                "--no-install".to_string(),
+                                "jest".to_string(),
+                                "--testMatch".to_string(),
+                                jest_match,
+                                lang_cfg.bridge_file.clone(),
+                            ],
+                        )
+                    }
                 }
             }
             "php" => {
-                let phpunit_bin = dir.join("vendor/bin/phpunit");
-                if phpunit_bin.exists() {
-                    ("vendor/bin/phpunit", vec![lang_cfg.bridge_file.as_str()])
+                let has_hydrator_pkg = dir.join("vendor/autotest/phpunit-autotest").exists();
+                if local_phpunit.exists() && has_hydrator_pkg {
+                    (
+                        local_phpunit.to_string_lossy().to_string(),
+                        vec![lang_cfg.bridge_file.clone()],
+                    )
                 } else {
-                    ("phpunit", vec![lang_cfg.bridge_file.as_str()])
+                    let runner_path = prepare_standalone_php_runner()?;
+                    (
+                        "php".to_string(),
+                        vec![
+                            runner_path.to_string_lossy().to_string(),
+                            scenario_dir.to_string_lossy().to_string(),
+                        ],
+                    )
                 }
             }
             _ => continue,
         };
 
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let envs = [("AUTOTEST_RECORD", "1")];
-        match sandbox_runner.run_command_with_env(program, &args, dir, &envs) {
+        match sandbox_runner.run_command_with_env(&program, &arg_refs, dir, &envs) {
             Ok(result) => {
                 println!(
                     "  Execution completed in {:?} (exit code: {:?})",
                     result.duration,
                     result.exit_code
                 );
-                if result.exit_code != Some(0) && !result.stderr.is_empty() {
-                    tracing::debug!("Sandbox stderr: {}", result.stderr);
+                if result.exit_code != Some(0) {
+                    let err_output = if !result.stderr.trim().is_empty() {
+                        result.stderr.trim()
+                    } else {
+                        result.stdout.trim()
+                    };
+                    if !err_output.is_empty() {
+                        let preview: String = err_output.lines().take(10).collect::<Vec<_>>().join("\n  ");
+                        println!("  Runner output:\n  {}", preview);
+                    }
                 }
             }
             Err(e) => {
                 println!("  Sandbox execution note for {}: {}", lang_name, e);
+                if config.sandbox.timeout_ms < 5_000 && e.to_string().contains("timed out") {
+                    println!(
+                        "  Hint: sandbox.timeout_ms in autotest.toml is {} ms. Increase it (e.g. timeout_ms = 10000).",
+                        config.sandbox.timeout_ms
+                    );
+                }
             }
         }
     }
