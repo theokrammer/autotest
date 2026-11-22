@@ -79,8 +79,9 @@ impl SymbolicSolver {
                         }
                     }
 
+                    let target_prefix = target.id.replace("::", "_").replace('\\', "_").replace('.', "_");
                     scenarios.push(ScenarioDefinition {
-                        name: format!("guard_{}_{}_throws", param.name, sanitize_tag(constraint)),
+                        name: format!("{}_guard_{}_{}_throws", target_prefix, param.name, sanitize_tag(constraint)),
                         mode: ScenarioMode::SymbolicContract,
                         locked: false,
                         stale: false,
