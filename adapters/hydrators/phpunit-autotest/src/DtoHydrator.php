@@ -8,11 +8,59 @@ final class DtoHydrator
     private static ?array $customFactories = null;
     private ?MockBinder $mockBinder = null;
     private ?object $testCase = null;
+    private string $targetNamespace = '';
 
     public function setMockContext(MockBinder $binder, object $testCase): void
     {
         $this->mockBinder = $binder;
         $this->testCase = $testCase;
+    }
+
+    public function setTargetNamespace(string $ns): void
+    {
+        $this->targetNamespace = trim($ns, '\\');
+    }
+
+    public function resolveTypeName(string $name): string
+    {
+        $clean = ltrim(trim($name), '?\\');
+        if ($clean === '' || class_exists($clean) || interface_exists($clean) || enum_exists($clean)) {
+            return $clean;
+        }
+        if ($clean === 'Autotest\\Hydrator\\AutotestStubBackedEnum') {
+            if (!enum_exists($clean, false)) {
+                eval('namespace Autotest\\Hydrator; enum AutotestStubBackedEnum: string { case TEST = "test"; }');
+            }
+            return $clean;
+        }
+        if (!str_contains($clean, '\\')) {
+            if ($this->targetNamespace !== '') {
+                $candidate = $this->targetNamespace . '\\' . $clean;
+                if (class_exists($candidate) || interface_exists($candidate) || enum_exists($candidate)) {
+                    return $candidate;
+                }
+                // Check parent namespace (e.g. Brick\Money\Context -> Brick\Money\CurrencyType)
+                $parentSlash = strrpos($this->targetNamespace, '\\');
+                if ($parentSlash !== false) {
+                    $parentCandidate = substr($this->targetNamespace, 0, $parentSlash) . '\\' . $clean;
+                    if (class_exists($parentCandidate) || interface_exists($parentCandidate) || enum_exists($parentCandidate)) {
+                        return $parentCandidate;
+                    }
+                }
+            }
+            $suffix = '\\' . $clean;
+            foreach (get_declared_classes() as $decl) {
+                if (str_ends_with($decl, $suffix)) {
+                    return $decl;
+                }
+            }
+            foreach (get_declared_interfaces() as $decl) {
+                if (str_ends_with($decl, $suffix)) {
+                    return $decl;
+                }
+            }
+        }
+        return $clean;
     }
 
     public function hydrate(mixed $value, ?string $expectedType = null): mixed
@@ -31,14 +79,18 @@ final class DtoHydrator
 
         // Built-in codecs
         if (isset($value['$type'])) {
-            $type = $value['$type'];
+            $rawType = (string)$value['$type'];
+            $type = $this->resolveTypeName($rawType);
+
+            if ($rawType === 'ClosureMarker') {
+                return fn() => null;
+            }
 
             // AutoMock synthesis
-            if ($type === 'AutoMock') {
-                $mockClass = (string)($value['class'] ?? 'stdClass');
-                $cleanMockClass = ltrim($mockClass, '\\');
-                if (($cleanMockClass === 'BackedEnum' || $cleanMockClass === 'UnitEnum') && $this->mockBinder !== null) {
-                    return $this->mockBinder->synthesizeDefaultForType($cleanMockClass, 0, $this->testCase);
+            if ($rawType === 'AutoMock') {
+                $mockClass = $this->resolveTypeName((string)($value['class'] ?? 'stdClass'));
+                if (($mockClass === 'BackedEnum' || $mockClass === 'UnitEnum' || enum_exists($mockClass)) && $this->mockBinder !== null) {
+                    return $this->mockBinder->synthesizeDefaultForType($mockClass, 0, $this->testCase);
                 }
                 $specs = [];
                 if (isset($value['methods']) && is_array($value['methods'])) {
@@ -61,13 +113,24 @@ final class DtoHydrator
                 return $customFactory($value);
             }
 
-            // Built-in date/time and callback codecs
-            if ($type === 'Callback') {
+            // Built-in date/time, enum, and callback codecs
+            if ($rawType === 'Callback') {
                 $returnSpec = $value['returns'] ?? null;
                 return fn(...$args) => $this->hydrate($returnSpec);
             }
-            if ($type === 'DateTimeImmutable' || $type === 'DateTimeInterface') {
+            if ($rawType === 'DateTimeImmutable' || $rawType === 'DateTimeInterface') {
                 return new \DateTimeImmutable($value['value'] ?? 'now');
+            }
+            if (enum_exists($type)) {
+                $caseName = $value['$props']['name'] ?? ($value['name'] ?? null);
+                if (is_string($caseName) && $caseName !== '') {
+                    $refEnum = new \ReflectionEnum($type);
+                    if ($refEnum->hasCase($caseName)) {
+                        return $refEnum->getCase($caseName)->getValue();
+                    }
+                }
+                $cases = $type::cases();
+                return $cases[0] ?? null;
             }
 
             $instance = null;
@@ -153,6 +216,10 @@ final class DtoHydrator
                 continue;
             }
             $refMethod = $refClass->getMethod($method);
+            // Skip static mutators (like Request::setFactory) when replaying instance setup_calls on a DTO argument
+            if ($refMethod->isStatic()) {
+                continue;
+            }
             $rawArgs = $call['args'] ?? [];
             $callArgs = $this->hydrateMethodArgs($refMethod, $rawArgs);
             $res = $refMethod->invokeArgs($instance, $callArgs);
@@ -163,7 +230,7 @@ final class DtoHydrator
         return $instance;
     }
 
-    public function hydrateMethodArgs(\ReflectionMethod $refMethod, array $rawArgs): array
+    public function hydrateMethodArgs(\ReflectionFunctionAbstract $refMethod, array $rawArgs): array
     {
         $callArgs = [];
         $idx = 0;
@@ -249,8 +316,8 @@ final class DtoHydrator
     private function resolveSingleClassOrInterface(string $type): ?string
     {
         foreach (explode('|', $type) as $part) {
-            $clean = ltrim(trim($part), '?\\');
-            if ($clean !== '' && (class_exists($clean) || interface_exists($clean))) {
+            $clean = $this->resolveTypeName($part);
+            if ($clean !== '' && (class_exists($clean) || interface_exists($clean) || enum_exists($clean))) {
                 return $clean;
             }
         }

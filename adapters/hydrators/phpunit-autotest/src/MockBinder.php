@@ -22,15 +22,31 @@ final class MockBinder
             return $this->synthesizeDefaultForType($cleanName, $depth, $testCase);
         }
 
+        $special = $this->specialTypeInstance($cleanName);
+        if ($special !== null) {
+            return $special;
+        }
+        if (class_exists($cleanName) && empty($mockSpecs) && $this->isUnextendable($cleanName)) {
+            $d = $this->synthesizeDefaultForType($cleanName, $depth + 1, $testCase);
+            if (is_object($d)) {
+                return $d;
+            }
+        }
+
         if (is_callable([$testCase, 'createMock'])) {
-            $mock = $testCase->createMock($interfaceOrClass);
+            try {
+                $mock = $testCase->createMock($interfaceOrClass);
+            } catch (\Throwable) {
+                $d = $this->synthesizeDefaultForType($cleanName, $depth + 1, $testCase);
+                return is_object($d) ? $d : new \stdClass();
+            }
         } else {
             // Standalone reflection fallback
             if (!interface_exists($interfaceOrClass) && !class_exists($interfaceOrClass)) {
                 return $this->createDynamicMockInterface($interfaceOrClass, $mockSpecs, $depth);
             }
             $ref = new \ReflectionClass($interfaceOrClass);
-            if ($ref->isInterface() || !$ref->isFinal()) {
+            if ($ref->isInterface() || !$this->isUnextendable($interfaceOrClass)) {
                 return $this->createDynamicMockInterface($interfaceOrClass, $mockSpecs, $depth);
             }
             return $this->synthesizeDefaultForType($interfaceOrClass, $depth + 1, $testCase) ?? $ref->newInstanceWithoutConstructor();
@@ -102,6 +118,15 @@ final class MockBinder
                 if ($m->isConstructor() || $m->isDestructor() || $m->isStatic() || isset($configuredMethods[$mName])) {
                     continue;
                 }
+                if ($mName === 'generate') {
+                    try {
+                        $mock->method($mName)->willReturnCallback(
+                            static fn(...$a) => str_repeat('0', isset($a[0]) && is_int($a[0]) && $a[0] > 0 ? $a[0] : 16)
+                        );
+                    } catch (\Throwable) {
+                    }
+                    continue;
+                }
                 $rt = $m->getReturnType();
                 if (!($rt instanceof \ReflectionNamedType) || $rt->allowsNull() || $rt->isBuiltin()) {
                     continue;
@@ -134,6 +159,10 @@ final class MockBinder
         $clean = ltrim($typeName, '?\\');
         if ($clean === '' || $clean === 'object') {
             return new \stdClass();
+        }
+        $specialInst = $this->specialTypeInstance($clean);
+        if ($specialInst !== null && $clean !== 'BackedEnum' && $clean !== 'UnitEnum') {
+            return $specialInst;
         }
         if ($clean === 'BackedEnum' || $clean === 'UnitEnum') {
             if (!enum_exists('Autotest\\Hydrator\\AutotestStubBackedEnum', false)) {
@@ -190,10 +219,26 @@ final class MockBinder
             try {
                 return $ref->newInstanceArgs($cArgs);
             } catch (\Throwable) {
+                // Retry with numeric/zero args for classes like Ramsey\Uuid\Type\Integer('0')
+                $altArgs = [];
+                foreach ($ctor->getParameters() as $cp) {
+                    $t = $cp->getType();
+                    $tn = $t instanceof \ReflectionNamedType ? $t->getName() : '';
+                    $altArgs[] = match ($tn) {
+                        'string' => '0',
+                        'int' => 0,
+                        'float' => 0.0,
+                        default => $this->defaultArgForReflectionParam($cp, $depth + 1, $testCase),
+                    };
+                }
+                try {
+                    return $ref->newInstanceArgs($altArgs);
+                } catch (\Throwable) {
+                }
             }
         }
 
-        if (!$ref->isFinal()) {
+        if (!$this->isUnextendable($clean)) {
             return $this->createDynamicMockInterface($clean, [], $depth + 1);
         }
 
@@ -201,8 +246,79 @@ final class MockBinder
         try {
             $ctor->invokeArgs($inst, $cArgs);
         } catch (\Throwable) {
+            // Ensure typed properties are initialized so getters don't throw Error: Typed property ... must not be accessed before initialization
+            $cur = $ref;
+            while ($cur !== false) {
+                foreach ($cur->getProperties() as $prop) {
+                    if ($prop->isStatic() || $prop->isInitialized($inst)) {
+                        continue;
+                    }
+                    $pt = $prop->getType();
+                    $val = null;
+                    if ($pt instanceof \ReflectionNamedType && !$pt->allowsNull()) {
+                        $val = match ($pt->getName()) {
+                            'string' => '0',
+                            'int' => 0,
+                            'float' => 0.0,
+                            'bool', 'false' => false,
+                            'true' => true,
+                            'array', 'iterable' => [],
+                            'object' => new \stdClass(),
+                            default => $this->synthesizeDefaultForType($pt->getName(), $depth + 1, $testCase),
+                        };
+                    }
+                    try {
+                        $prop->setValue($inst, $val);
+                    } catch (\Throwable) {
+                    }
+                }
+                $cur = $cur->getParentClass();
+            }
         }
         return $inst;
+    }
+
+    /**
+     * Types PHP forbids user classes from implementing/extending (enums, DateTimeInterface, Throwable, DateInterval)
+     * are replaced by real instances instead of dynamic mocks.
+     */
+    private function specialTypeInstance(string $name): ?object
+    {
+        $clean = ltrim($name, '\\');
+        if ($clean === '' || $clean === 'BackedEnum' || $clean === 'UnitEnum') {
+            return null;
+        }
+        if (enum_exists($clean)) {
+            $cases = $clean::cases();
+            return $cases[0] ?? null;
+        }
+        if (strcasecmp($clean, 'DateTimeInterface') === 0 || strcasecmp($clean, 'DateTimeImmutable') === 0) {
+            return new \DateTimeImmutable('2024-01-01T00:00:00+00:00');
+        }
+        if (strcasecmp($clean, 'DateTime') === 0) {
+            return new \DateTime('2024-01-01T00:00:00+00:00');
+        }
+        if (strcasecmp($clean, 'DateInterval') === 0) {
+            return new \DateInterval('P0D');
+        }
+        if (strcasecmp($clean, 'DateTimeZone') === 0) {
+            return new \DateTimeZone('UTC');
+        }
+        if (strcasecmp($clean, 'Throwable') === 0) {
+            return new \RuntimeException('autotest');
+        }
+        return null;
+    }
+
+    /** Final / readonly classes and classes with final constructors cannot be subclassed by mocks. */
+    private function isUnextendable(string $class): bool
+    {
+        if (!class_exists($class)) {
+            return false;
+        }
+        $r = new \ReflectionClass($class);
+        $ctor = $r->getConstructor();
+        return $r->isFinal() || $r->isReadOnly() || ($ctor !== null && $ctor->isFinal());
     }
 
     private function defaultArgForReflectionParam(\ReflectionParameter $param, int $depth, ?object $testCase): mixed
@@ -356,14 +472,29 @@ final class MockBinder
             };
         }
 
+        $special = $this->specialTypeInstance($interfaceOrClass);
+        if ($special !== null) {
+            return $special;
+        }
+        if (class_exists($interfaceOrClass) && $this->isUnextendable($interfaceOrClass)) {
+            $d = $this->synthesizeDefaultForType($interfaceOrClass, $depth + 1, null);
+            if (is_object($d)) {
+                return $d;
+            }
+        }
+
         $clean = str_replace('\\', '_', trim($interfaceOrClass, '\\'));
         $className = 'AutotestMock_' . $clean . '_' . substr(md5($interfaceOrClass), 0, 8);
 
         if (!class_exists($className, false)) {
             $ref = new \ReflectionClass($interfaceOrClass);
             $methodsCode = [];
-            foreach ($ref->getMethods(\ReflectionMethod::IS_PUBLIC) as $m) {
-                if ($m->isConstructor() || $m->isDestructor() || $m->isStatic()) {
+            foreach ($ref->getMethods(\ReflectionMethod::IS_PUBLIC | \ReflectionMethod::IS_PROTECTED) as $m) {
+                if ($m->isConstructor() || $m->isDestructor() || $m->isFinal()) {
+                    continue;
+                }
+                // Only emit protected or static methods if they are abstract (e.g. AbstractSessionHandler::doRead or RandomLib\Mixer::getStrength)
+                if (($m->isProtected() || $m->isStatic()) && !$m->isAbstract()) {
                     continue;
                 }
                 $mName = $m->getName();
@@ -401,11 +532,21 @@ final class MockBinder
                         $retType = ': ' . $rtStr;
                     }
                 }
-                if ($isVoid) {
-                    $methodsCode[] = "public function {$mName}({$paramList}){$retType} { \$this->__dispatch('{$mName}', func_get_args()); return; }";
+                $vis = $m->isProtected() ? 'protected' : 'public';
+                if ($m->isStatic()) {
+                    if ($isVoid) {
+                        $methodsCode[] = "{$vis} static function {$mName}({$paramList}){$retType} { return; }";
+                    } else {
+                        $staticFallback = $this->staticDefaultReturnExpr($m->getReturnType(), $interfaceOrClass);
+                        $methodsCode[] = "{$vis} static function {$mName}({$paramList}){$retType} { return {$staticFallback}; }";
+                    }
+                } elseif ($isVoid) {
+                    $methodsCode[] = "{$vis} function {$mName}({$paramList}){$retType} { \$this->__dispatch('{$mName}', func_get_args()); return; }";
+                } elseif ($mName === 'generate') {
+                    $methodsCode[] = "{$vis} function {$mName}({$paramList}){$retType} { \$a = func_get_args(); \$r = \$this->__dispatch('{$mName}', \$a); return \$r !== null ? \$r : str_repeat('0', isset(\$a[0]) && is_int(\$a[0]) && \$a[0] > 0 ? \$a[0] : 16); }";
                 } else {
                     $fallbackExpr = $this->defaultReturnExpr($m->getReturnType(), $interfaceOrClass, $depth);
-                    $methodsCode[] = "public function {$mName}({$paramList}){$retType} { \$r = \$this->__dispatch('{$mName}', func_get_args()); return \$r !== null ? \$r : {$fallbackExpr}; }";
+                    $methodsCode[] = "{$vis} function {$mName}({$paramList}){$retType} { \$r = \$this->__dispatch('{$mName}', func_get_args()); return \$r !== null ? \$r : {$fallbackExpr}; }";
                 }
             }
             $methodsStr = implode("\n", $methodsCode);
@@ -487,9 +628,32 @@ final class MockBinder
                     default => 'null',
                 };
             }
-            if ($depth < 3 && (class_exists($name) || interface_exists($name))) {
+            if ($depth < 3 && (class_exists($name) || interface_exists($name) || enum_exists($name))) {
                 $escaped = var_export($name, true);
                 return "\$this->__binder->synthesizeDefaultForType({$escaped}, \$this->__depth + 1)";
+            }
+        }
+        return 'null';
+    }
+
+    private function staticDefaultReturnExpr(?\ReflectionType $type, string $ownerClass = ''): string
+    {
+        if ($type instanceof \ReflectionNamedType && !$type->allowsNull()) {
+            $name = $type->getName();
+            if ($type->isBuiltin()) {
+                return match ($name) {
+                    'array', 'iterable' => '[]',
+                    'string' => "''",
+                    'int' => '0',
+                    'float' => '0.0',
+                    'bool', 'false' => 'false',
+                    'true' => 'true',
+                    'object' => 'new \stdClass()',
+                    default => 'null',
+                };
+            }
+            if (enum_exists($name)) {
+                return '\\' . ltrim($name, '\\') . '::cases()[0]';
             }
         }
         return 'null';

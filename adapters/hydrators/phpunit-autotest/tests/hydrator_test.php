@@ -229,6 +229,18 @@ namespace Tests\Autotest {
         $recClosureDecoded = json_decode(json_encode($recClosure), true);
         $asserter->assertOutcome($objWithClosure, null, $recClosureDecoded, $testCase);
         echo "  ClosureMarker record/assert parity passed\n";
+
+        // 10. Test MockBinder special types (DateTimeInterface, Throwable, readonly classes, final methods) + non-deterministic recording
+        $dtMock = $mockBinder->createMockForService(\DateTimeInterface::class, [], $dummyTestCase);
+        assert($dtMock instanceof \DateTimeInterface);
+        $thrMock = $mockBinder->createMockForService(\Throwable::class, [], $dummyTestCase);
+        assert($thrMock instanceof \Throwable);
+        $splMock = $mockBinder->createMockForService(\SplFileInfo::class, [], $dummyTestCase);
+        assert($splMock instanceof \SplFileInfo);
+        $nonDetRec = $recorder->recordOutcome('random-token-123', null, true);
+        assert(!array_key_exists('value', $nonDetRec));
+        $asserter->assertOutcome('different-random-token-456', null, $nonDetRec, $testCase);
+        echo "  Special types, final methods, and non-deterministic record/assert passed\n";
     } catch (\Throwable $e) {
         $errors[] = "AutotestHydrator end-to-end failed: " . $e->getMessage();
         echo "  AutotestHydrator end-to-end FAILED: " . get_class($e) . ": " . $e->getMessage() . "\n";

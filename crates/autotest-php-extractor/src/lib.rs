@@ -104,6 +104,25 @@ impl PhpExtractor {
             "mago-analyzer@1.59.0"
         };
 
+        // Standalone (namespaced) functions
+        for (fn_id, method) in Self::parse_php_functions(content) {
+            targets.push(TargetDefinition {
+                id: fn_id,
+                kind: TargetKind::Function,
+                signature: SignatureDefinition {
+                    constructor_args: Vec::new(),
+                    parameters: method.parameters.clone(),
+                    return_type: method.return_type.clone(),
+                    static_factories: Vec::new(),
+                    implements: Vec::new(),
+                    private_constructor: false,
+                },
+                detected_side_effects: method.detected_side_effects.clone(),
+                metadata_keys: Vec::new(),
+                scenarios: Vec::new(),
+            });
+        }
+
         Ok(ScenarioDocument {
             schema: Some("https://autotest.dev/schema/scenario.v1.schema.json".to_string()),
             schema_version: "1.0".to_string(),
@@ -455,6 +474,102 @@ impl PhpExtractor {
         params
     }
 
+    /// Extracts top-level (non-class) functions; returns `(Namespace\name, metadata)` pairs.
+    pub fn parse_php_functions(content: &str) -> Vec<(String, PhpMethodMetadata)> {
+        let ns_regex = Regex::new(r"namespace\s+([^;{\s]+);").unwrap();
+        let namespace = ns_regex
+            .captures(content)
+            .map(|c| c[1].trim().to_string())
+            .unwrap_or_default();
+
+        let mut use_map: HashMap<String, String> = HashMap::new();
+        let use_re = Regex::new(r"(?m)^\s*use\s+([A-Za-z0-9_\\]+)(?:\s+as\s+([A-Za-z0-9_]+))?\s*;").unwrap();
+        for cap in use_re.captures_iter(content) {
+            let fqcn = cap[1].trim_start_matches('\\').to_string();
+            let alias = cap
+                .get(2)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_else(|| fqcn.rsplit('\\').next().unwrap_or(&fqcn).to_string());
+            use_map.insert(alias, fqcn);
+        }
+
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
+        let decl_re = Regex::new(
+            r"(?m)^[ \t]*(?:final\s+|readonly\s+|abstract\s+)*(?:class|interface|trait|enum)\s+[A-Za-z0-9_]+[^{;]*\{"
+        ).unwrap();
+        for m in decl_re.find_iter(content) {
+            let start = m.end() - 1;
+            if let Some(body) = Self::extract_braced_slice(content, start) {
+                ranges.push((start, start + body.len() + 2));
+            }
+        }
+
+        let fn_re = Regex::new(
+            r"(?m)^[ \t]*function\s+&?([A-Za-z0-9_]+)\s*\(([^)]*)\)(?:\s*:\s*([?A-Za-z0-9_\\|&]+))?\s*\{"
+        ).unwrap();
+        let mut out = Vec::new();
+        for cap in fn_re.captures_iter(content) {
+            let whole = cap.get(0).unwrap();
+            if ranges.iter().any(|(a, b)| whole.start() > *a && whole.start() < *b) {
+                continue;
+            }
+            let name = cap[1].to_string();
+            let body = Self::extract_braced_slice(content, whole.end() - 1).unwrap_or("");
+            let docblock = Self::extract_preceding_docblock(&content[..whole.start()]);
+            let params = Self::parse_method_params(&cap[2], docblock, &namespace, &use_map, body);
+            let native_rt = cap.get(3).map(|m| Self::resolve_php_type(m.as_str().trim(), &namespace, &use_map));
+            let return_type = match (
+                native_rt.as_deref(),
+                docblock.and_then(|d| Self::extract_docblock_return_type(d, &namespace, &use_map)),
+            ) {
+                (Some("array") | Some("iterable") | None, Some(doc_rt)) => Some(doc_rt),
+                (Some(n), _) => Some(n.to_string()),
+                (None, None) => None,
+            };
+
+            let mut side_effects = Vec::new();
+            let lname = name.to_lowercase();
+            if body.contains("random_bytes(")
+                || body.contains("random_int(")
+                || body.contains("mt_rand(")
+                || body.contains("uniqid(")
+                || lname.contains("random")
+                || lname.contains("uuid1")
+                || lname.contains("uuid4")
+                || lname.contains("uuid6")
+                || lname.contains("uuid7")
+            {
+                side_effects.push(DetectedSideEffect {
+                    effect_type: "rng".to_string(),
+                    target: "random".to_string(),
+                    mockable: true,
+                });
+            }
+            if body.contains("$_ENV") || body.contains("$_SERVER") || body.contains("exec(") || body.contains("system(") {
+                side_effects.push(DetectedSideEffect {
+                    effect_type: "unmockable_side_effect".to_string(),
+                    target: "global.state".to_string(),
+                    mockable: false,
+                });
+            }
+
+            let id = if namespace.is_empty() { name.clone() } else { format!("{}\\{}", namespace, name) };
+            out.push((
+                id,
+                PhpMethodMetadata {
+                    name,
+                    is_static: false,
+                    is_public: true,
+                    parameters: params,
+                    return_type,
+                    detected_side_effects: side_effects,
+                    throws: Vec::new(),
+                },
+            ));
+        }
+        out
+    }
+
     pub fn parse_php(content: &str) -> Result<Vec<PhpClassMetadata>, ExtractorError> {
         let mut classes = Vec::new();
 
@@ -617,6 +732,27 @@ impl PhpExtractor {
                     });
                 }
 
+                // Non-deterministic sources (RNG / unique ids)
+                let lname = method_name.to_lowercase();
+                if method_body.contains("random_bytes(")
+                    || method_body.contains("random_int(")
+                    || method_body.contains("mt_rand(")
+                    || method_body.contains("uniqid(")
+                    || method_body.contains("str_shuffle(")
+                    || method_body.contains("shuffle(")
+                    || lname.contains("random")
+                    || lname.contains("uuid1")
+                    || lname.contains("uuid4")
+                    || lname.contains("uuid6")
+                    || lname.contains("uuid7")
+                {
+                    side_effects.push(DetectedSideEffect {
+                        effect_type: "rng".to_string(),
+                        target: "random".to_string(),
+                        mockable: true,
+                    });
+                }
+
                 // Unmockable side effects
                 if method_body.contains("$_ENV") || method_body.contains("$_SERVER") || method_body.contains("exec(") || method_body.contains("system(") {
                     side_effects.push(DetectedSideEffect {
@@ -708,5 +844,32 @@ final class MatchingResult
         let add_route = doc.targets.iter().find(|t| t.id == "Yiisoft\\Router\\MatchingResult::addRoute").unwrap();
         assert_eq!(add_route.signature.parameters[0].name, "routes");
         assert!(add_route.signature.parameters[0].constraints.contains(&"variadic".to_string()));
+    }
+
+    #[test]
+    fn test_php_standalone_functions_and_rng_side_effects() {
+        let code = r#"<?php
+namespace Ramsey\Uuid;
+
+function uuid4(): string
+{
+    return bin2hex(random_bytes(16));
+}
+
+final class ByteString
+{
+    public static function fromRandom(int $length = 16): self
+    {
+        return new self();
+    }
+}
+"#;
+        let doc = PhpExtractor::extract_source("src/functions.php", code).unwrap();
+        let fn_target = doc.targets.iter().find(|t| t.id == "Ramsey\\Uuid\\uuid4").unwrap();
+        assert_eq!(fn_target.kind, autotest_core::ir::TargetKind::Function);
+        assert!(fn_target.detected_side_effects.iter().any(|e| e.effect_type == "rng"));
+
+        let from_random = doc.targets.iter().find(|t| t.id == "Ramsey\\Uuid\\ByteString::fromRandom").unwrap();
+        assert!(from_random.detected_side_effects.iter().any(|e| e.effect_type == "rng"));
     }
 }

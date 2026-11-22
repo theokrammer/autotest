@@ -20,6 +20,47 @@ final class TargetInvoker
         ?array $invokeReturnedArgs = null,
         ?array $factorySpec = null
     ): mixed {
+        set_error_handler(
+            static fn() => true,
+            E_WARNING | E_NOTICE | E_USER_WARNING | E_USER_NOTICE | E_DEPRECATED | E_USER_DEPRECATED
+        );
+        try {
+            return $this->doInvokeTarget(
+                $targetId,
+                $constructorArgs,
+                $inputArgs,
+                $setupCalls,
+                $invokeReturnedArgs,
+                $factorySpec
+            );
+        } finally {
+            restore_error_handler();
+        }
+    }
+
+    private function doInvokeTarget(
+        string $targetId,
+        array $constructorArgs,
+        array $inputArgs,
+        array $setupCalls = [],
+        ?array $invokeReturnedArgs = null,
+        ?array $factorySpec = null
+    ): mixed {
+        // Standalone namespaced PHP functions (no class separator in the target id)
+        if (!str_contains($targetId, '::') && !str_contains($targetId, '.')) {
+            if (!function_exists($targetId)) {
+                throw new \RuntimeException("Target function not found: {$targetId}");
+            }
+            $refFn = new \ReflectionFunction($targetId);
+            $fnArgs = $this->dtoHydrator->hydrateMethodArgs($refFn, $inputArgs);
+            $fnResult = $refFn->invokeArgs($fnArgs);
+            if ($invokeReturnedArgs !== null && is_callable($fnResult)) {
+                $retArgs = array_map(fn($a) => $this->dtoHydrator->hydrate($a), $invokeReturnedArgs);
+                $fnResult = $fnResult(...$retArgs);
+            }
+            return $fnResult;
+        }
+
         if (str_contains($targetId, '::')) {
             [$className, $methodName] = explode('::', $targetId, 2);
         } else {

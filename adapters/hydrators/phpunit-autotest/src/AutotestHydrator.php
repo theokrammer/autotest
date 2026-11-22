@@ -34,6 +34,7 @@ final class AutotestHydrator
         // 2. Identify target signature from document
         $data = $this->loader->loadScenarioFile($scenarioFilePath);
         $targetId = null;
+        $nonDeterministic = false;
         $constructorArgsSpec = [];
 
         $requestedTargetId = $options['target_id'] ?? ($scenarioSpec['$target_id'] ?? null);
@@ -44,6 +45,12 @@ final class AutotestHydrator
             foreach ($target['scenarios'] ?? [] as $sc) {
                 if ($sc['name'] === ($scenarioSpec['name'] ?? '')) {
                     $targetId = $target['id'];
+                    foreach ($target['detected_side_effects'] ?? [] as $eff) {
+                        $t = $eff['type'] ?? ($eff['effect_type'] ?? '');
+                        if ($t === 'rng' || $t === 'clock_read') {
+                            $nonDeterministic = true;
+                        }
+                    }
                     $constructorArgsSpec = $target['signature']['constructor_args'] ?? [];
                     if (empty($mocks) && isset($sc['mocks'])) {
                         $mocks = $sc['mocks'];
@@ -74,7 +81,8 @@ final class AutotestHydrator
         }
         unset($m);
 
-        // 3. Bind mocks & constructor overrides
+        // 3. Bind mocks, constructor overrides & invoke target inside a single try/catch
+        // so exceptions thrown during producer-chain constructor_overrides or $factory setup are recorded and asserted.
         $targetClass = '';
         $targetNamespace = '';
         if (str_contains($targetId, '::')) {
@@ -84,6 +92,7 @@ final class AutotestHydrator
                 $targetNamespace = substr($targetClass, 0, $lastSlash);
             }
         }
+        $this->dtoHydrator->setTargetNamespace($targetNamespace);
 
         // Prefer live PHP reflection types for constructor params so FQCNs match
         $refCtorParams = [];
@@ -100,74 +109,62 @@ final class AutotestHydrator
         }
 
         $constructorOverrides = $scenarioSpec['constructor_overrides'] ?? [];
-        $mockInstances = [];
-        foreach ($constructorArgsSpec as $ctorParam) {
-            $paramType = $ctorParam['type'];
-            $paramName = $ctorParam['name'];
-
-            if (array_key_exists($paramName, $constructorOverrides)) {
-                $mockInstances[] = $this->dtoHydrator->hydrate($constructorOverrides[$paramName]);
-                continue;
-            }
-
-            // Resolve short class/interface names relative to target class namespace or reflection
-            $resolvedType = ltrim($refCtorParams[$paramName] ?? $paramType, '?');
-            if (
-                !interface_exists($resolvedType)
-                && !class_exists($resolvedType)
-                && $targetNamespace !== ''
-                && !str_contains($resolvedType, '\\')
-            ) {
-                $candidate = $targetNamespace . '\\' . $resolvedType;
-                if (interface_exists($candidate) || class_exists($candidate)) {
-                    $resolvedType = $candidate;
-                }
-            }
-
-            // Match mocks targeting this parameter
-            $matchingMocks = array_filter($mocks, function ($m) use ($paramName, $resolvedType) {
-                $target = $m['target'] ?? '';
-                $shortType = basename(str_replace('\\', '/', $resolvedType));
-                return str_starts_with($target, $paramName . '.')
-                    || str_starts_with($target, $paramName . '::')
-                    || str_starts_with($target, $resolvedType . '::')
-                    || str_starts_with($target, $resolvedType . '.')
-                    || str_starts_with($target, $shortType . '::')
-                    || str_starts_with($target, $shortType . '.');
-            });
-
-            if (!empty($matchingMocks) || interface_exists($resolvedType) || class_exists($resolvedType)) {
-                $mockInstances[] = $this->mockBinder->createMockForService($resolvedType, $matchingMocks, $testCase);
-            } elseif (array_key_exists('default_value', $ctorParam) && $ctorParam['default_value'] !== null) {
-                $mockInstances[] = $this->dtoHydrator->hydrate($ctorParam['default_value'], $paramType);
-            } else {
-                $cleanType = ltrim($paramType, '?');
-                if (str_starts_with($paramType, '?') || str_contains($paramType, 'null')) {
-                    $mockInstances[] = null;
-                } else {
-                    $mockInstances[] = match ($cleanType) {
-                        'string' => '/test',
-                        'int' => 1,
-                        'float' => 1.0,
-                        'bool' => false,
-                        'array', 'iterable' => ['GET'],
-                        default => null,
-                    };
-                }
-            }
-        }
-
-        // 4. Target invocation & error capture
-        $actualReturn = null;
-        $actualException = null;
-
         $setupCalls = $scenarioSpec['setup_calls'] ?? [];
         $invokeReturnedArgs = array_key_exists('invoke_returned_args', $scenarioSpec)
             ? $scenarioSpec['invoke_returned_args']
             : null;
         $factorySpec = $scenarioSpec['factory'] ?? null;
 
+        $actualReturn = null;
+        $actualException = null;
+
         try {
+            $mockInstances = [];
+            foreach ($constructorArgsSpec as $ctorParam) {
+                $paramType = $ctorParam['type'];
+                $paramName = $ctorParam['name'];
+
+                if (array_key_exists($paramName, $constructorOverrides)) {
+                    $mockInstances[] = $this->dtoHydrator->hydrate($constructorOverrides[$paramName]);
+                    continue;
+                }
+
+                // Resolve short class/interface/enum names relative to target class namespace or reflection
+                $resolvedType = $this->dtoHydrator->resolveTypeName(ltrim($refCtorParams[$paramName] ?? $paramType, '?'));
+
+                // Match mocks targeting this parameter
+                $matchingMocks = array_filter($mocks, function ($m) use ($paramName, $resolvedType) {
+                    $target = $m['target'] ?? '';
+                    $shortType = basename(str_replace('\\', '/', $resolvedType));
+                    return str_starts_with($target, $paramName . '.')
+                        || str_starts_with($target, $paramName . '::')
+                        || str_starts_with($target, $resolvedType . '::')
+                        || str_starts_with($target, $resolvedType . '.')
+                        || str_starts_with($target, $shortType . '::')
+                        || str_starts_with($target, $shortType . '.');
+                });
+
+                if (!empty($matchingMocks) || interface_exists($resolvedType) || class_exists($resolvedType) || enum_exists($resolvedType)) {
+                    $mockInstances[] = $this->mockBinder->createMockForService($resolvedType, $matchingMocks, $testCase);
+                } elseif (array_key_exists('default_value', $ctorParam) && $ctorParam['default_value'] !== null) {
+                    $mockInstances[] = $this->dtoHydrator->hydrate($ctorParam['default_value'], $paramType);
+                } else {
+                    $cleanType = ltrim($paramType, '?');
+                    if (str_starts_with($paramType, '?') || str_contains($paramType, 'null')) {
+                        $mockInstances[] = null;
+                    } else {
+                        $mockInstances[] = match ($cleanType) {
+                            'string' => '/test',
+                            'int' => 1,
+                            'float' => 1.0,
+                            'bool' => false,
+                            'array', 'iterable' => ['GET'],
+                            default => null,
+                        };
+                    }
+                }
+            }
+
             $actualReturn = $this->targetInvoker->invokeTarget(
                 $targetId,
                 $mockInstances,
@@ -178,12 +175,20 @@ final class AutotestHydrator
             );
         } catch (\Throwable $t) {
             $actualException = $t;
+        } finally {
+            // Always reset static Request::$requestFactory if Request is loaded
+            if (class_exists('Symfony\\Component\\HttpFoundation\\Request', false)) {
+                \Symfony\Component\HttpFoundation\Request::setFactory(null);
+            }
         }
 
         if (getenv('AUTOTEST_RECORD') !== false || !empty($options['record'])) {
-            $recorded = $this->recorderHook->recordOutcome($actualReturn, $actualException);
+            $recorded = $this->recorderHook->recordOutcome($actualReturn, $actualException, $nonDeterministic);
+            if (json_encode($recorded) === false) {
+                unset($recorded['value']);
+            }
             if (!empty($options['record_output'])) {
-                file_put_contents($options['record_output'], json_encode($recorded, JSON_PRETTY_PRINT));
+                file_put_contents($options['record_output'], json_encode($recorded, JSON_PRETTY_PRINT | JSON_INVALID_UTF8_SUBSTITUTE));
             } else {
                 $stagingPath = str_replace('.autotest.json', '.autotest.staging.json', $scenarioFilePath);
                 if ($stagingPath === $scenarioFilePath) {
@@ -215,7 +220,10 @@ final class AutotestHydrator
                 if (!$replaced) {
                     $entries[] = $entry;
                 }
-                file_put_contents($stagingPath, json_encode($entries, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+                $encoded = json_encode($entries, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+                if (is_string($encoded)) {
+                    file_put_contents($stagingPath, $encoded);
+                }
             }
             return;
         }

@@ -30,17 +30,23 @@ final class OutcomeAsserter
 
                 if (!array_key_exists('value', $expectedSpec) && !empty($expectedSpec['type'])) {
                     $expectedType = $expectedSpec['type'];
-                    if (interface_exists($expectedType) || class_exists($expectedType)) {
+                    if ($expectedType === 'object' || str_contains($expectedType, '@anonymous')) {
+                        if (method_exists($testCase, 'assertIsObject')) {
+                            $testCase->assertIsObject($actualReturn);
+                        } elseif (!is_object($actualReturn)) {
+                            throw new \AssertionError("Expected object");
+                        }
+                    } elseif (interface_exists($expectedType) || class_exists($expectedType) || enum_exists($expectedType)) {
                         if (method_exists($testCase, 'assertInstanceOf')) {
                             $testCase->assertInstanceOf($expectedType, $actualReturn);
                         } elseif (!($actualReturn instanceof $expectedType)) {
                             throw new \AssertionError("Expected instance of {$expectedType}");
                         }
-                    } elseif ($expectedType === 'object') {
-                        if (method_exists($testCase, 'assertIsObject')) {
-                            $testCase->assertIsObject($actualReturn);
-                        } elseif (!is_object($actualReturn)) {
-                            throw new \AssertionError("Expected object");
+                    } elseif (in_array($expectedType, ['string', 'integer', 'double', 'boolean', 'array', 'NULL'], true)) {
+                        if (method_exists($testCase, 'assertSame')) {
+                            $testCase->assertSame($expectedType, gettype($actualReturn));
+                        } elseif (gettype($actualReturn) !== $expectedType) {
+                            throw new \AssertionError("Expected type {$expectedType}, got " . gettype($actualReturn));
                         }
                     }
                     break;
