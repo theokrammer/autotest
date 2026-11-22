@@ -347,12 +347,14 @@ impl TsPrecheckExtractor {
                 let raw_params = &m_cap[3];
                 let return_type = m_cap.get(4).map(|m| m.as_str().trim().to_string());
 
-                let parameters = Self::parse_parameters(raw_params);
+                let mut parameters = Self::parse_parameters(raw_params);
 
-                // Find method body to check side effects and throws
+                // Find method body to check side effects, branch literals, and throws
                 let method_start = m_cap.get(0).unwrap().end();
                 let method_body = Self::extract_braced_block(&class_body[method_start - 1..])
                     .unwrap_or_default();
+
+                Self::extract_branch_constraints(&method_body, &mut parameters);
 
                 let mut detected_side_effects = Self::detect_side_effects(&method_body);
                 if class_body.contains("randomStringGenerator(")
@@ -418,9 +420,10 @@ impl TsPrecheckExtractor {
             let raw_params = &f_cap[3];
             let ret_type = f_cap.get(4).map(|m| m.as_str().trim().to_string());
 
-            let parameters = Self::parse_parameters(raw_params);
+            let mut parameters = Self::parse_parameters(raw_params);
             let fn_start = f_cap.get(0).unwrap().end();
             let fn_body = Self::extract_braced_block(&clean_source[fn_start - 1..]).unwrap_or_default();
+            Self::extract_branch_constraints(&fn_body, &mut parameters);
             let mut detected_side_effects = Self::detect_side_effects(&fn_body);
             if fn_name.to_lowercase().contains("random")
                 && !detected_side_effects.iter().any(|e| e.effect_type == "rng")
@@ -567,6 +570,53 @@ impl TsPrecheckExtractor {
             });
         }
         parameters
+    }
+
+    fn extract_branch_constraints(body: &str, params: &mut [ParameterDefinition]) {
+        for param in params.iter_mut() {
+            if param.name.is_empty() || param.name.contains(' ') {
+                continue;
+            }
+            let escaped = regex::escape(&param.name);
+            let mut added = 0usize;
+
+            // Match `param === 'lit'` or `param == "lit"` or `param !== 'lit'`
+            if let Ok(eq_re) = Regex::new(&format!(r"\b{}\s*[!=]==?\s*['\x22]([A-Za-z0-9_./:-]{{1,32}})['\x22]", escaped)) {
+                for cap in eq_re.captures_iter(body) {
+                    let c = format!("eq:{}", &cap[1]);
+                    if !param.constraints.contains(&c) {
+                        param.constraints.push(c);
+                        added += 1;
+                        if added >= 3 {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Match `switch (param)` case string literals
+            if added < 3 && body.contains(&format!("switch ({})", param.name)) {
+                if let Ok(case_re) = Regex::new(r"case\s+['\x22]([A-Za-z0-9_./:-]{1,32})['\x22]\s*:") {
+                    for cap in case_re.captures_iter(body) {
+                        let c = format!("eq:{}", &cap[1]);
+                        if !param.constraints.contains(&c) {
+                            param.constraints.push(c);
+                            added += 1;
+                            if added >= 3 {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Match negative number branch `param < 0` or `param <= 0`
+            if (body.contains(&format!("{} < 0", param.name)) || body.contains(&format!("{} <= 0", param.name)))
+                && !param.constraints.iter().any(|c| c == "branch_num:-1")
+            {
+                param.constraints.push("branch_num:-1".to_string());
+            }
+        }
     }
 
     fn detect_side_effects(body: &str) -> Vec<DetectedSideEffect> {

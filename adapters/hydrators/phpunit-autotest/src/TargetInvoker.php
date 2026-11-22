@@ -15,7 +15,9 @@ final class TargetInvoker
     public function invokeTarget(
         string $targetId,
         array $constructorArgs,
-        array $inputArgs
+        array $inputArgs,
+        array $setupCalls = [],
+        ?array $invokeReturnedArgs = null
     ): mixed {
         if (str_contains($targetId, '::')) {
             [$className, $methodName] = explode('::', $targetId, 2);
@@ -61,11 +63,39 @@ final class TargetInvoker
         }
 
         if ($refMethod->isStatic()) {
-            return $refMethod->invokeArgs(null, $callArgs);
+            $result = $refMethod->invokeArgs(null, $callArgs);
+        } else {
+            $instance = $this->instantiateClass($refClass, $constructorArgs);
+            foreach ($setupCalls as $call) {
+                $setupMethod = $call['method'] ?? null;
+                if ($setupMethod && $refClass->hasMethod($setupMethod)) {
+                    $setupRef = $refClass->getMethod($setupMethod);
+                    $setupArgs = [];
+                    $rawSetupArgs = $call['args'] ?? [];
+                    foreach ($setupRef->getParameters() as $sIdx => $sParam) {
+                        if (array_key_exists($sIdx, $rawSetupArgs)) {
+                            $sType = $sParam->getType();
+                            $sTypeStr = $sType instanceof \ReflectionNamedType ? $sType->getName() : null;
+                            $setupArgs[] = $this->dtoHydrator->hydrate($rawSetupArgs[$sIdx], $sTypeStr);
+                        } elseif ($sParam->isDefaultValueAvailable()) {
+                            $setupArgs[] = $sParam->getDefaultValue();
+                        }
+                    }
+                    $setupRes = $setupRef->invokeArgs($instance, $setupArgs);
+                    if (is_object($setupRes) && $setupRes instanceof $className) {
+                        $instance = $setupRes;
+                    }
+                }
+            }
+            $result = $refMethod->invokeArgs($instance, $callArgs);
         }
 
-        $instance = $this->instantiateClass($refClass, $constructorArgs);
-        return $refMethod->invokeArgs($instance, $callArgs);
+        if ($invokeReturnedArgs !== null && is_callable($result)) {
+            $retArgs = array_map(fn($a) => $this->dtoHydrator->hydrate($a), $invokeReturnedArgs);
+            $result = $result(...$retArgs);
+        }
+
+        return $result;
     }
 
     private function instantiateClass(\ReflectionClass $refClass, array $constructorArgs): object

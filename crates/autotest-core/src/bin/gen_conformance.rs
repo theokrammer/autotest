@@ -109,6 +109,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         mocks: vec![MockReferenceOrInline::Reference {
                             reference: "#/fixtures/mock_tax_repo".to_string(),
                         }],
+                        setup_calls: vec![],
+                        invoke_returned_args: None,
                         inputs: json!({"country": "DE", "netAmount": 100.0}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -201,6 +203,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                                 reference: "#/fixtures/mock_currency_converter".to_string(),
                             },
                         ],
+                        setup_calls: vec![],
+                        invoke_returned_args: None,
                         inputs: json!({"country": "DE", "currency": "USD", "amount": 100.0}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -239,6 +243,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     stale: false,
                     tags: vec!["hydration".to_string(), "ctor".to_string()],
                     mocks: vec![],
+                    setup_calls: vec![],
+                    invoke_returned_args: None,
                     inputs: json!({
                         "money": {
                             "$type": "App\\ValueObject\\Money",
@@ -284,6 +290,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     stale: false,
                     tags: vec!["hydration".to_string(), "factory".to_string()],
                     mocks: vec![],
+                    setup_calls: vec![],
+                    invoke_returned_args: None,
                     inputs: json!({
                         "money": {
                             "$type": "App\\ValueObject\\Money",
@@ -331,6 +339,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     stale: false,
                     tags: vec!["hydration".to_string(), "props".to_string()],
                     mocks: vec![],
+                    setup_calls: vec![],
+                    invoke_returned_args: None,
                     inputs: json!({
                         "profile": {
                             "$type": "App\\DTO\\UserProfile",
@@ -377,6 +387,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     stale: false,
                     tags: vec!["boundary".to_string(), "zero_float".to_string()],
                     mocks: vec![],
+                    setup_calls: vec![],
+                    invoke_returned_args: None,
                     inputs: json!({"amount": 0.0}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::Return,
@@ -414,6 +426,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     stale: false,
                     tags: vec!["guard_clause".to_string(), "negative".to_string()],
                     mocks: vec![],
+                    setup_calls: vec![],
+                    invoke_returned_args: None,
                     inputs: json!({"amount": -0.01}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::Exception,
@@ -451,6 +465,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     stale: false,
                     tags: vec!["guard_clause".to_string(), "empty_string".to_string()],
                     mocks: vec![],
+                    setup_calls: vec![],
+                    invoke_returned_args: None,
                     inputs: json!({"code": ""}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::Exception,
@@ -488,6 +504,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     stale: false,
                     tags: vec!["boundary".to_string(), "fixed_length".to_string()],
                     mocks: vec![],
+                    setup_calls: vec![],
+                    invoke_returned_args: None,
                     inputs: json!({"countryCode": "DE"}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::Return,
@@ -543,6 +561,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         mocks: vec![MockReferenceOrInline::Reference {
                             reference: "#/fixtures/mock_exact_order".to_string(),
                         }],
+                        setup_calls: vec![],
+                        invoke_returned_args: None,
                         inputs: json!({"orderNumber": "ORD-12345"}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -602,6 +622,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         mocks: vec![MockReferenceOrInline::Reference {
                             reference: "#/fixtures/mock_email_sender".to_string(),
                         }],
+                        setup_calls: vec![],
+                        invoke_returned_args: None,
                         inputs: json!({"email": "test@example.com"}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -658,6 +680,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         mocks: vec![MockReferenceOrInline::Reference {
                             reference: "#/fixtures/mock_tier_calc".to_string(),
                         }],
+                        setup_calls: vec![],
+                        invoke_returned_args: None,
                         inputs: json!({"total": 250.0}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -714,6 +738,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         mocks: vec![MockReferenceOrInline::Reference {
                             reference: "#/fixtures/mock_auth_guard".to_string(),
                         }],
+                        setup_calls: vec![],
+                        invoke_returned_args: None,
                         inputs: json!({"session": {"userId": "usr_99", "role": "admin", "token": "xyz"}}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -771,6 +797,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         mocks: vec![MockReferenceOrInline::Reference {
                             reference: "#/fixtures/mock_token_sequence".to_string(),
                         }],
+                        setup_calls: vec![],
+                        invoke_returned_args: None,
                         inputs: json!({"count": 3}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -829,6 +857,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         mocks: vec![MockReferenceOrInline::Reference {
                             reference: "#/fixtures/mock_byte_reader".to_string(),
                         }],
+                        setup_calls: vec![],
+                        invoke_returned_args: None,
                         inputs: json!({"buffer": {"capacity": 1024}}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -885,6 +915,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         mocks: vec![MockReferenceOrInline::Reference {
                             reference: "#/fixtures/mock_audit_logger".to_string(),
                         }],
+                        setup_calls: vec![],
+                        invoke_returned_args: None,
                         inputs: json!({"orderIds": [101, 102]}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -923,6 +955,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     stale: false,
                     tags: vec!["exception".to_string(), "exception_type".to_string()],
                     mocks: vec![],
+                    setup_calls: vec![],
+                    invoke_returned_args: None,
                     inputs: json!({"id": "MISSING_ID_999"}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::Exception,
@@ -960,6 +994,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     stale: false,
                     tags: vec!["exception".to_string(), "message_contains".to_string()],
                     mocks: vec![],
+                    setup_calls: vec![],
+                    invoke_returned_args: None,
                     inputs: json!({"token": "EXPIRED_TOKEN_ABC"}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::Exception,
@@ -997,6 +1033,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     stale: false,
                     tags: vec!["no_crash".to_string(), "void_method".to_string()],
                     mocks: vec![],
+                    setup_calls: vec![],
+                    invoke_returned_args: None,
                     inputs: json!({"payload": {"event": "HEARTBEAT"}}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::NoCrash,
@@ -1034,6 +1072,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     stale: false,
                     tags: vec!["curated".to_string(), "locked_preserve".to_string()],
                     mocks: vec![],
+                    setup_calls: vec![],
+                    invoke_returned_args: None,
                     inputs: json!({"rate": 0.25}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::Return,
@@ -1071,6 +1111,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     stale: false,
                     tags: vec!["unlocked".to_string(), "candidate_for_removal".to_string()],
                     mocks: vec![],
+                    setup_calls: vec![],
+                    invoke_returned_args: None,
                     inputs: json!({"param": "deprecated_value"}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::Return,
@@ -1108,6 +1150,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                     stale: true,
                     tags: vec!["drift".to_string(), "param_removed".to_string()],
                     mocks: vec![],
+                    setup_calls: vec![],
+                    invoke_returned_args: None,
                     inputs: json!({"obsoleteParam": "drift_value"}),
                     expected: ExpectedOutcome {
                         outcome: OutcomeKind::Return,
@@ -1159,6 +1203,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         mocks: vec![MockReferenceOrInline::Reference {
                             reference: "#/fixtures/removed_side_effect".to_string(),
                         }],
+                        setup_calls: vec![],
+                        invoke_returned_args: None,
                         inputs: json!({"taskName": "daily_sync"}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -1203,6 +1249,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         stale: false,
                         tags: vec!["cache".to_string(), "transitive_invalidation".to_string()],
                         mocks: vec![],
+                        setup_calls: vec![],
+                        invoke_returned_args: None,
                         inputs: json!({"amount": 100.0}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,
@@ -1251,6 +1299,8 @@ pub fn build_all_25_conformance_docs() -> Vec<(&'static str, ScenarioDocument)> 
                         stale: false,
                         tags: vec!["cache".to_string(), "cyclic_tarjan_scc".to_string()],
                         mocks: vec![],
+                        setup_calls: vec![],
+                        invoke_returned_args: None,
                         inputs: json!({"orderId": "ORD-42"}),
                         expected: ExpectedOutcome {
                             outcome: OutcomeKind::Return,

@@ -138,8 +138,19 @@ final class AutotestHydrator
         $actualReturn = null;
         $actualException = null;
 
+        $setupCalls = $scenarioSpec['setup_calls'] ?? [];
+        $invokeReturnedArgs = array_key_exists('invoke_returned_args', $scenarioSpec)
+            ? $scenarioSpec['invoke_returned_args']
+            : null;
+
         try {
-            $actualReturn = $this->targetInvoker->invokeTarget($targetId, $mockInstances, $inputs);
+            $actualReturn = $this->targetInvoker->invokeTarget(
+                $targetId,
+                $mockInstances,
+                $inputs,
+                $setupCalls,
+                $invokeReturnedArgs
+            );
         } catch (\Throwable $t) {
             $actualException = $t;
         }

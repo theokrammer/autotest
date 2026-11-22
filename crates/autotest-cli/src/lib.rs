@@ -517,13 +517,8 @@ pub fn handle_generate(
                     None
                 };
 
-                // Solve symbolic contracts for extracted targets
-                for target in &mut extracted_doc.targets {
-                    let new_scenarios = solver.solve_target(target);
-                    if !new_scenarios.is_empty() {
-                        target.scenarios = new_scenarios;
-                    }
-                }
+                // Solve symbolic contracts & stateful call chains for extracted targets
+                solver.solve_document(&mut extracted_doc);
 
                 if config.project.deduplicate_fixtures {
                     FixtureDeduplicator::deduplicate(&mut extracted_doc);

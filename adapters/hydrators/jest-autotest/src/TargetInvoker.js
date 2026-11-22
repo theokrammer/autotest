@@ -64,7 +64,20 @@ class TargetInvoker {
           return undefined;
         });
 
-        const instance = new TargetClass(...ctorArgs);
+        let instance = new TargetClass(...ctorArgs);
+        if (Array.isArray(scenarioSpec.setup_calls)) {
+          for (const call of scenarioSpec.setup_calls) {
+            if (call && typeof instance[call.method] === 'function') {
+              const callArgs = Array.isArray(call.args)
+                ? call.args.map(a => this.dtoHydrator.hydrate(a, classRegistry))
+                : [];
+              const setupRes = await instance[call.method](...callArgs);
+              if (setupRes instanceof TargetClass) {
+                instance = setupRes;
+              }
+            }
+          }
+        }
         if (typeof instance[methodName] !== 'function') {
           throw new Error(`Method ${methodName} not found on ${className}`);
         }
@@ -74,6 +87,15 @@ class TargetInvoker {
       // Await if result is a promise
       if (result && typeof result.then === 'function') {
         result = await result;
+      }
+
+      // Higher-order function invocation (e.g. factory/decorator/middleware creators)
+      if (Array.isArray(scenarioSpec.invoke_returned_args) && typeof result === 'function') {
+        const retArgs = scenarioSpec.invoke_returned_args.map(a => this.dtoHydrator.hydrate(a, classRegistry));
+        result = result(...retArgs);
+        if (result && typeof result.then === 'function') {
+          result = await result;
+        }
       }
 
       return { result, error: null };

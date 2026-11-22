@@ -311,6 +311,23 @@ impl PhpExtractor {
                         }
                     }
 
+                    if ptype == "string" || ptype == "mixed" {
+                        let escaped = regex::escape(&pname);
+                        if let Ok(eq_re) = Regex::new(&format!(r"\${}\s*[!=]==?\s*['\x22]([A-Za-z0-9_./:-]{{1,32}})['\x22]", escaped)) {
+                            let mut added = 0usize;
+                            for eq_cap in eq_re.captures_iter(class_content) {
+                                let c = format!("eq:{}", &eq_cap[1]);
+                                if !constraints.contains(&c) {
+                                    constraints.push(c);
+                                    added += 1;
+                                    if added >= 3 {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     params.push(ParameterDefinition {
                         name: pname,
                         param_type: ptype,

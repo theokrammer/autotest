@@ -200,6 +200,8 @@ fn test_conformance_20_to_23_merge_and_drift_detection() {
         stale: false,
         tags: vec!["custom".to_string()],
         mocks: vec![],
+        setup_calls: vec![],
+        invoke_returned_args: None,
         inputs: json!({ "amount": 100.0, "countryCode": "DE" }),
         expected: ExpectedOutcome {
             outcome: OutcomeKind::Return,
@@ -242,6 +244,8 @@ fn test_conformance_20_to_23_merge_and_drift_detection() {
         stale: false,
         tags: vec![],
         mocks: vec![],
+        setup_calls: vec![],
+        invoke_returned_args: None,
         inputs: json!({}),
         expected: ExpectedOutcome {
             outcome: OutcomeKind::Return,

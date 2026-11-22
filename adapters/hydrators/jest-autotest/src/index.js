@@ -73,7 +73,9 @@ class AutotestHydrator {
     // Record mode: stage the outcome and skip placeholder assertions
     if (options.record) {
       const effects = targetDef.detected_side_effects || [];
-      const nonDeterministic = effects.some(e => e.type === 'rng' || e.effect_type === 'rng' || e.type === 'clock_read' || e.effect_type === 'clock_read');
+      const nonDeterministic = effects.some(
+        e => e.type === 'rng' || e.effect_type === 'rng' || e.type === 'clock_read' || e.effect_type === 'clock_read'
+      ) || (Array.isArray(scenarioSpec.invoke_returned_args) && /random|alphabet|nanoid/i.test(targetDef.id || ''));
       this.recorderHook.recordOutcome(scenarioFilePath, targetDef.id, scenarioSpec.name, outcome, { nonDeterministic });
       return;
     }

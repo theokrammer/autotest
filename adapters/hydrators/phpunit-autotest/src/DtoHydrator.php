@@ -23,7 +23,11 @@ final class DtoHydrator
                 return $customFactory($value);
             }
 
-            // Built-in date/time codecs
+            // Built-in date/time and callback codecs
+            if ($type === 'Callback') {
+                $returnSpec = $value['returns'] ?? null;
+                return fn(...$args) => $this->hydrate($returnSpec);
+            }
             if ($type === 'DateTimeImmutable' || $type === 'DateTimeInterface') {
                 return new \DateTimeImmutable($value['value'] ?? 'now');
             }

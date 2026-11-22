@@ -112,6 +112,13 @@ pub struct DetectedSideEffect {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SetupCall {
+    pub method: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ScenarioDefinition {
     pub name: String,
     pub mode: ScenarioMode,
@@ -123,6 +130,10 @@ pub struct ScenarioDefinition {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mocks: Vec<MockReferenceOrInline>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub setup_calls: Vec<SetupCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invoke_returned_args: Option<Vec<serde_json::Value>>,
     pub inputs: serde_json::Value,
     pub expected: ExpectedOutcome,
 }

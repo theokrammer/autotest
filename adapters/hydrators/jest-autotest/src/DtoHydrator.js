@@ -27,6 +27,10 @@ class DtoHydrator {
         }
 
         // Built-in codecs
+        if (type === 'Callback') {
+          const returnSpec = value.returns;
+          return (..._args) => this.hydrate(returnSpec, classRegistry);
+        }
         if (type === 'Undefined') {
           return undefined;
         }

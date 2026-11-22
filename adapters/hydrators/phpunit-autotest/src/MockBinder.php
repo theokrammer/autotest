@@ -25,10 +25,7 @@ final class MockBinder
             if ($ref->isInterface() || !$ref->isFinal()) {
                 return $this->createDynamicMockInterface($interfaceOrClass, $mockSpecs);
             }
-            if (empty($mockSpecs)) {
-                return $ref->newInstanceWithoutConstructor();
-            }
-            throw new \RuntimeException("Cannot mock final class {$interfaceOrClass} with custom specs without TestCase");
+            return $ref->newInstanceWithoutConstructor();
         }
 
         foreach ($mockSpecs as $spec) {
