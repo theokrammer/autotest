@@ -110,6 +110,15 @@ class OutcomeAsserter {
         if (expect) {
           expect(normalizedActual == null).toBe(true);
         }
+      } else if (
+        normalizedActual instanceof Date
+        && Number.isNaN(normalizedActual.getTime())
+        && expectedValue instanceof Date
+        && Number.isNaN(expectedValue.getTime())
+      ) {
+        if (expect) {
+          expect(Number.isNaN(normalizedActual.getTime())).toBe(true);
+        }
       } else if (expect) {
         expect(normalizedActual).toEqual(expectedValue);
       } else {

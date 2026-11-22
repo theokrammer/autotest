@@ -298,6 +298,85 @@ impl PhpExtractor {
         }
     }
 
+    fn extract_balanced_parens_slice<'a>(content: &'a str, open_paren: usize) -> Option<(&'a str, usize)> {
+        let mut depth = 0usize;
+        for (idx, b) in content[open_paren..].bytes().enumerate() {
+            if b == b'(' {
+                depth += 1;
+            } else if b == b')' {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let close_pos = open_paren + idx;
+                    return Some((&content[open_paren + 1..close_pos], close_pos + 1));
+                }
+            }
+        }
+        None
+    }
+
+    fn split_top_level_commas(s: &str) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let mut depth_paren = 0usize;
+        let mut depth_brace = 0usize;
+        let mut depth_bracket = 0usize;
+        let mut depth_angle = 0usize;
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut prev_bs = false;
+        let mut start = 0usize;
+        let bytes = s.as_bytes();
+        for (i, &b) in bytes.iter().enumerate() {
+            if prev_bs {
+                prev_bs = false;
+                continue;
+            }
+            if (in_single || in_double) && b == b'\\' {
+                prev_bs = true;
+                continue;
+            }
+            if !in_double && b == b'\'' {
+                in_single = !in_single;
+            } else if !in_single && b == b'"' {
+                in_double = !in_double;
+            } else if !in_single && !in_double {
+                match b {
+                    b'(' => depth_paren += 1,
+                    b')' => depth_paren = depth_paren.saturating_sub(1),
+                    b'{' => depth_brace += 1,
+                    b'}' => depth_brace = depth_brace.saturating_sub(1),
+                    b'[' => depth_bracket += 1,
+                    b']' => depth_bracket = depth_bracket.saturating_sub(1),
+                    b'<' => depth_angle += 1,
+                    b'>' => depth_angle = depth_angle.saturating_sub(1),
+                    b',' if depth_paren == 0 && depth_brace == 0 && depth_bracket == 0 && depth_angle == 0 => {
+                        parts.push(&s[start..i]);
+                        start = i + 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if start <= s.len() {
+            parts.push(&s[start..]);
+        }
+        parts
+    }
+
+    fn harvest_php_regex_consts(content: &str) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        let re = Regex::new(
+            r#"(?s)const\s+([A-Z0-9_]+)\s*=\s*(?:'([/#~][^']+)'|"([/#~][^"]+)")\s*;"#
+        ).unwrap();
+        for cap in re.captures_iter(content) {
+            let name = cap[1].to_string();
+            let pat = cap.get(2).or_else(|| cap.get(3)).map(|m| m.as_str()).unwrap_or("");
+            if let Some(sample) = autotest_core::sample_from_regex(pat) {
+                map.insert(name, sample);
+            }
+        }
+        map
+    }
+
     fn extract_preceding_docblock(before: &str) -> Option<&str> {
         let trimmed = before.trim_end();
         if !trimmed.ends_with("*/") {
@@ -345,13 +424,15 @@ impl PhpExtractor {
         namespace: &str,
         use_map: &HashMap<String, String>,
         method_body: &str,
+        regex_consts: &HashMap<String, String>,
+        owner_class: &str,
     ) -> Vec<ParameterDefinition> {
         let doc_params = docblock
             .map(|d| Self::extract_docblock_param_types(d, namespace, use_map))
             .unwrap_or_default();
 
         let mut params = Vec::new();
-        for p in raw_params.split(',') {
+        for p in Self::split_top_level_commas(raw_params) {
             let p_trim = p.trim();
             if p_trim.is_empty() {
                 continue;
@@ -370,32 +451,133 @@ impl PhpExtractor {
             }
 
             let scope = if method_body.is_empty() { "" } else { method_body };
-            if ptype == "float" || ptype == "int" {
+            let escaped = regex::escape(&pname);
+
+            if ptype == "float" || ptype == "int" || ptype.contains("int") || ptype.contains("float") {
                 constraints.push("finite".to_string());
-                if scope.contains(&format!("${} < 0", pname)) || scope.contains(&format!("${} <= 0", pname)) {
+                if scope.contains(&format!("${} < 0", pname))
+                    || scope.contains(&format!("${} <= 0", pname))
+                    || scope.contains(&format!("$this->{} < 0", pname))
+                    || scope.contains(&format!("$this->{} <= 0", pname))
+                {
                     constraints.push(">= 0.0".to_string());
                 }
-            } else if ptype == "string" {
+                if !scope.is_empty() {
+                    if let Ok(num_re) = Regex::new(&format!(
+                        r"\$(?:this->)?{}\b\s*(?:[!=]==?|[<>]=?)\s*(-?\d+(?:\.\d+)?)",
+                        escaped
+                    )) {
+                        for n_cap in num_re.captures_iter(scope).take(4) {
+                            let c = format!("branch_num:{}", &n_cap[1]);
+                            if !constraints.contains(&c) {
+                                constraints.push(c);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if ptype.contains("string") || ptype == "mixed" {
                 let has_non_empty_guard = scope.contains(&format!("empty(${})", pname))
                     || scope.contains(&format!("${} === ''", pname))
                     || scope.contains(&format!("${} === \"\"", pname))
+                    || scope.contains(&format!("'' !== ${}", pname))
                     || scope.contains(&format!("trim(${}) === ''", pname))
                     || scope.contains(&format!("strlen(${}) === 0", pname))
                     || scope.contains(&format!("non-empty-string ${}", pname));
                 if has_non_empty_guard {
                     constraints.push("non-empty-string".to_string());
                 }
-                if scope.contains(&format!("strlen(${}) !== 2", pname)) || scope.contains(&format!("strlen(${}) != 2", pname)) {
-                    constraints.push("length == 2".to_string());
+
+                // 1. Generalized string length comparisons: strlen($param) / strlen($this->param)
+                if !scope.is_empty() {
+                    if let Ok(len_re) = Regex::new(&format!(
+                        r"(?:mb_)?strlen\s*\(\s*\$(?:this->)?{}\s*\)\s*([!=]==?|[<>]=?)\s*(\d+)",
+                        escaped
+                    )) {
+                        for l_cap in len_re.captures_iter(scope) {
+                            let op = &l_cap[1];
+                            if let Ok(n) = l_cap[2].parse::<usize>() {
+                                let target_len = if op == ">" || op == "<=" { n + 1 } else { n };
+                                if target_len > 0 && target_len <= 1024 {
+                                    let c = format!("length == {}", target_len);
+                                    if !constraints.contains(&c) {
+                                        constraints.push(c);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
-            if !scope.is_empty() && (ptype == "string" || ptype == "mixed") {
-                let escaped = regex::escape(&pname);
+            if !scope.is_empty() && (ptype.contains("string") || ptype == "mixed") {
                 let mut added = 0usize;
 
+                // 2. Regex constant & literal matching: preg_match(self::CONST, $param) or preg_match('/.../', $param)
+                if let Ok(pm_const_re) = Regex::new(&format!(
+                    r"preg_match(?:_all)?\s*\(\s*(?:self::|static::|[A-Za-z0-9_\\]+::)?([A-Z0-9_]+)\s*,\s*(?:\(string\)\s*)?\$(?:this->)?{}\b",
+                    escaped
+                )) {
+                    for pm_cap in pm_const_re.captures_iter(scope) {
+                        if let Some(sample) = regex_consts.get(&pm_cap[1]) {
+                            let v = format!("valid:{}", sample);
+                            let eq = format!("eq:{}", sample);
+                            if !constraints.contains(&v) {
+                                constraints.push(v);
+                            }
+                            if !constraints.contains(&eq) {
+                                constraints.push(eq);
+                                added += 1;
+                            }
+                        }
+                    }
+                }
+                if let Ok(pm_lit_re) = Regex::new(&format!(
+                    r#"preg_match(?:_all)?\s*\(\s*['"]([/#~][^'"]+)['"]\s*,\s*(?:\(string\)\s*)?\$(?:this->)?{}\b"#,
+                    escaped
+                )) {
+                    for pm_cap in pm_lit_re.captures_iter(scope) {
+                        if let Some(sample) = autotest_core::sample_from_regex(&pm_cap[1]) {
+                            let v = format!("valid:{}", sample);
+                            let eq = format!("eq:{}", sample);
+                            if !constraints.contains(&v) {
+                                constraints.push(v);
+                            }
+                            if !constraints.contains(&eq) {
+                                constraints.push(eq);
+                                added += 1;
+                            }
+                        }
+                    }
+                }
+
+                // 3. Static lookup-table key accesses: $this->table[$param] or self::$table[$param]
+                if let Ok(tbl_re) = Regex::new(&format!(
+                    r"(?:\$this->|(?:self|static)::\$?)([A-Za-z0-9_]+)\[\s*\$(?:this->)?{}\s*\]",
+                    escaped
+                )) {
+                    for t_cap in tbl_re.captures_iter(scope) {
+                        let c = format!("lookup_key:{}", &t_cap[1]);
+                        if !constraints.contains(&c) {
+                            constraints.push(c);
+                        }
+                    }
+                }
+                if let Ok(ak_re) = Regex::new(&format!(
+                    r"array_key_exists\s*\(\s*\$(?:this->)?{}\s*,\s*(?:\$this->|(?:self|static)::\$?)([A-Za-z0-9_]+)\s*\)",
+                    escaped
+                )) {
+                    for t_cap in ak_re.captures_iter(scope) {
+                        let c = format!("lookup_key:{}", &t_cap[1]);
+                        if !constraints.contains(&c) {
+                            constraints.push(c);
+                        }
+                    }
+                }
+
                 // Direct equality checks: $param === 'lit'
-                if let Ok(eq_re) = Regex::new(&format!(r"\${}\s*[!=]==?\s*['\x22]([A-Za-z0-9_./:-]{{1,32}})['\x22]", escaped)) {
+                if let Ok(eq_re) = Regex::new(&format!(r"\$(?:this->)?{}\s*[!=]==?\s*['\x22]([A-Za-z0-9_./:-]{{1,32}})['\x22]", escaped)) {
                     for eq_cap in eq_re.captures_iter(scope) {
                         let c = format!("eq:{}", &eq_cap[1]);
                         if !constraints.contains(&c) {
@@ -447,8 +629,56 @@ impl PhpExtractor {
                 }
             }
 
+            // 4. Inter-procedural call forwarding: `->callee(..., $param, ...)` / `Cls::callee(..., $param, ...)` / `new self(..., $param, ...)`
+            if !scope.is_empty() {
+                if let Ok(call_re) = Regex::new(r"(?:([A-Za-z0-9_\\]+)::|(->)|(new\s+))([A-Za-z0-9_]+)\s*\(([^()]{1,240})\)") {
+                    for c_cap in call_re.captures_iter(scope) {
+                        let static_cls = c_cap.get(1).map(|m| m.as_str());
+                        let is_new = c_cap.get(3).is_some();
+                        let raw_callee = &c_cap[4];
+                        if matches!(
+                            raw_callee,
+                            "strlen" | "mb_strlen" | "preg_match" | "preg_match_all" | "isset" | "empty" | "trim" | "strtolower" | "strtoupper" | "is_string" | "is_int" | "is_array"
+                        ) {
+                            continue;
+                        }
+                        let args_slice = &c_cap[5];
+                        for (arg_idx, raw_arg) in Self::split_top_level_commas(args_slice).iter().enumerate() {
+                            let cleaned_arg = raw_arg
+                                .trim()
+                                .trim_start_matches("(string)")
+                                .trim_start_matches("(int)")
+                                .trim_start_matches("(float)")
+                                .trim();
+                            if cleaned_arg == format!("${}", pname) || cleaned_arg == format!("$this->{}", pname) {
+                                let callee_key = if is_new {
+                                    if (raw_callee == "self" || raw_callee == "static") && !owner_class.is_empty() {
+                                        format!("{}::__construct", owner_class)
+                                    } else {
+                                        let short_c = raw_callee.rsplit('\\').next().unwrap_or(raw_callee);
+                                        format!("{}::__construct", short_c)
+                                    }
+                                } else if let Some(cls_q) = static_cls {
+                                    if (cls_q == "self" || cls_q == "static" || cls_q == "parent") && !owner_class.is_empty() {
+                                        format!("{}::{}", owner_class, raw_callee)
+                                    } else {
+                                        let short_c = cls_q.rsplit('\\').next().unwrap_or(cls_q);
+                                        format!("{}::{}", short_c, raw_callee)
+                                    }
+                                } else {
+                                    raw_callee.to_string()
+                                };
+                                let fwd = format!("forward:{}:{}", callee_key, arg_idx);
+                                if !constraints.contains(&fwd) {
+                                    constraints.push(fwd);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if !scope.is_empty() && (ptype == "array" || ptype.starts_with("array<") || ptype == "mixed") {
-                let escaped = regex::escape(&pname);
                 if let Ok(key_re) = Regex::new(&format!(r"\${}\[['\x22]([A-Za-z0-9_-]{{1,32}})['\x22]\]", escaped)) {
                     let mut prop_count = 0usize;
                     for k_cap in key_re.captures_iter(scope) {
@@ -504,6 +734,7 @@ impl PhpExtractor {
             }
         }
 
+        let regex_consts = Self::harvest_php_regex_consts(content);
         let fn_re = Regex::new(
             r"(?m)^[ \t]*function\s+&?([A-Za-z0-9_]+)\s*\(([^)]*)\)(?:\s*:\s*([?A-Za-z0-9_\\|&]+))?\s*\{"
         ).unwrap();
@@ -516,7 +747,7 @@ impl PhpExtractor {
             let name = cap[1].to_string();
             let body = Self::extract_braced_slice(content, whole.end() - 1).unwrap_or("");
             let docblock = Self::extract_preceding_docblock(&content[..whole.start()]);
-            let params = Self::parse_method_params(&cap[2], docblock, &namespace, &use_map, body);
+            let params = Self::parse_method_params(&cap[2], docblock, &namespace, &use_map, body, &regex_consts, "");
             let native_rt = cap.get(3).map(|m| Self::resolve_php_type(m.as_str().trim(), &namespace, &use_map));
             let return_type = match (
                 native_rt.as_deref(),
@@ -620,6 +851,7 @@ impl PhpExtractor {
 
         for (class_name, implements) in class_headers {
             let class_content = Self::extract_class_body(content, &class_name).unwrap_or(content);
+            let regex_consts = Self::harvest_php_regex_consts(class_content);
 
             let mut constructor_params = Vec::new();
             let mut private_constructor = false;
@@ -627,82 +859,83 @@ impl PhpExtractor {
             let public_properties = Vec::new();
             let mut methods = Vec::new();
 
-            // Constructor Property Promotion and Standard Constructor (public, protected, or private)
-            let ctor_regex = Regex::new(r"(?m)(public|protected|private)?\s*function\s+__construct\s*\(([^)]*)\)").unwrap();
+            // Constructor Property Promotion and Standard Constructor (public, protected, or private, with balanced parens)
+            let ctor_regex = Regex::new(r"(?m)(public|protected|private)?\s*function\s+__construct\s*\(").unwrap();
             if let Some(cap) = ctor_regex.captures(class_content) {
+                let full = cap.get(0).unwrap();
                 let vis = cap.get(1).map_or("public", |m| m.as_str());
                 private_constructor = vis == "private" || vis == "protected";
-                let ctor_doc = Self::extract_preceding_docblock(&class_content[..cap.get(0).unwrap().start()]);
-                let doc_params = ctor_doc
-                    .map(|d| Self::extract_docblock_param_types(d, &namespace, &use_map))
-                    .unwrap_or_default();
-
-                let params_str = &cap[2];
-                for param_def in params_str.split(',') {
-                    let trimmed = param_def.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    let (mut param_type, param_name, default_value, is_variadic) =
-                        Self::parse_param_def(trimmed, &namespace, &use_map);
-                    if (param_type == "array" || param_type == "iterable" || param_type == "mixed")
-                        && doc_params.contains_key(&param_name)
-                    {
-                        param_type = doc_params[&param_name].clone();
-                    }
-                    let mut constraints = Vec::new();
-                    if is_variadic {
-                        constraints.push("variadic".to_string());
-                    }
-
-                    constructor_params.push(ParameterDefinition {
-                        name: param_name,
-                        param_type,
-                        constraints,
-                        default_value,
-                    });
+                let ctor_doc = Self::extract_preceding_docblock(&class_content[..full.start()]);
+                if let Some((params_str, after_close)) = Self::extract_balanced_parens_slice(class_content, full.end() - 1) {
+                    let ctor_body = class_content[after_close..]
+                        .find('{')
+                        .and_then(|rel_b| Self::extract_braced_slice(class_content, after_close + rel_b))
+                        .unwrap_or("");
+                    constructor_params = Self::parse_method_params(
+                        params_str,
+                        ctor_doc,
+                        &namespace,
+                        &use_map,
+                        ctor_body,
+                        &regex_consts,
+                        &class_name,
+                    );
                 }
             }
 
-            // Static factories returning self/static/ClassName
-            let factory_regex = Regex::new(
-                r"public\s+static\s+function\s+([A-Za-z0-9_]+)\s*\(([^)]*)\)\s*:\s*(self|static|[A-Za-z0-9_\\]+)"
+            // Static factories & Methods (with balanced parens so `= new DefaultContext()` in parameter defaults works)
+            let method_header_re = Regex::new(
+                r"(?m)(public|protected|private)?\s*(static\s+)?function\s+([A-Za-z0-9_]+)\s*\("
             ).unwrap();
-            for cap in factory_regex.captures_iter(class_content) {
-                let fname = cap[1].to_string();
-                let rtype = &cap[3];
-                if rtype == "self" || rtype == "static" || rtype == class_name {
-                    let fparams = Self::parse_method_params(&cap[2], None, &namespace, &use_map, "");
-                    static_factories.push(FactorySignature {
-                        name: fname,
-                        parameters: fparams,
-                    });
-                }
-            }
+            let ret_term_re = Regex::new(r"^\s*(?::\s*([?A-Za-z0-9_\\|&]+))?\s*(\{|;)").unwrap();
 
-            // Methods
-            let method_regex = Regex::new(
-                r"(?m)(public|protected|private)?\s*(static\s+)?function\s+([A-Za-z0-9_]+)\s*\(([^)]*)\)(?:\s*:\s*([?A-Za-z0-9_\\|&]+))?\s*(\{|;)"
-            ).unwrap();
-            for cap in method_regex.captures_iter(class_content) {
+            for cap in method_header_re.captures_iter(class_content) {
+                let full = cap.get(0).unwrap();
                 let visibility = cap.get(1).map_or("public", |m| m.as_str());
                 let is_static = cap.get(2).is_some();
                 let method_name = cap[3].to_string();
-                let raw_params = &cap[4];
-                let native_rt = cap.get(5).map(|m| Self::resolve_php_type(m.as_str().trim(), &namespace, &use_map));
-                let terminator = &cap[6];
 
-                let m_start = cap.get(0).unwrap().start();
+                let Some((raw_params, after_close)) = Self::extract_balanced_parens_slice(class_content, full.end() - 1) else {
+                    continue;
+                };
+                let Some(rt_cap) = ret_term_re.captures(&class_content[after_close..]) else {
+                    continue;
+                };
+                let raw_rt_str = rt_cap.get(1).map(|m| m.as_str().trim());
+                let native_rt = raw_rt_str.map(|s| Self::resolve_php_type(s, &namespace, &use_map));
+                let terminator = &rt_cap[2];
+
+                let m_start = full.start();
                 let docblock = Self::extract_preceding_docblock(&class_content[..m_start]);
 
                 let method_body = if terminator == "{" {
-                    let brace_pos = cap.get(6).unwrap().start();
+                    let brace_pos = after_close + rt_cap.get(2).unwrap().start();
                     Self::extract_braced_slice(class_content, brace_pos).unwrap_or("")
                 } else {
                     ""
                 };
 
-                let params = Self::parse_method_params(raw_params, docblock, &namespace, &use_map, method_body);
+                let params = Self::parse_method_params(
+                    raw_params,
+                    docblock,
+                    &namespace,
+                    &use_map,
+                    method_body,
+                    &regex_consts,
+                    &class_name,
+                );
+
+                // Register public static factory if return type is self/static/ClassName
+                if visibility == "public" && is_static {
+                    if let Some(rt_raw) = raw_rt_str {
+                        if rt_raw == "self" || rt_raw == "static" || rt_raw == class_name {
+                            static_factories.push(FactorySignature {
+                                name: method_name.clone(),
+                                parameters: params.clone(),
+                            });
+                        }
+                    }
+                }
 
                 let return_type = match (native_rt.as_deref(), docblock.and_then(|d| Self::extract_docblock_return_type(d, &namespace, &use_map))) {
                     (Some("array") | Some("iterable") | None, Some(doc_rt)) => Some(doc_rt),
@@ -871,5 +1104,57 @@ final class ByteString
 
         let from_random = doc.targets.iter().find(|t| t.id == "Ramsey\\Uuid\\ByteString::fromRandom").unwrap();
         assert!(from_random.detected_side_effects.iter().any(|e| e.effect_type == "rng"));
+    }
+
+    #[test]
+    fn test_php_static_constraint_mechanisms_length_regex_lookup_and_forwarding() {
+        let code = r#"<?php
+namespace Demo;
+
+final class Urn
+{
+    private const REGEXP_URN_PARTS = '/^urn:(?<nid>[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?):(?<nss>.*?)$/xi';
+
+    private function __construct(private string $bytes)
+    {
+        if (strlen($this->bytes) !== 16) {
+            throw new \InvalidArgumentException('must be 16 bytes');
+        }
+    }
+
+    public static function new(string $urn): self
+    {
+        return self::fromString($urn);
+    }
+
+    public static function fromString(string $urn): self
+    {
+        1 === preg_match(self::REGEXP_URN_PARTS, $urn, $matches) || throw new \RuntimeException('bad');
+        return new self('0000000000000000');
+    }
+
+    public static function of(int|string $amount, string $currency, Context $ctx = new DefaultContext()): self
+    {
+        if (!isset($this->currencyData[$currency])) {
+            throw new \RuntimeException('unknown');
+        }
+        return new self('0000000000000000');
+    }
+}
+"#;
+        let doc = PhpExtractor::extract_source("src/Urn.php", code).unwrap();
+        let from_str = doc.targets.iter().find(|t| t.id == "Demo\\Urn::fromString").unwrap();
+        assert!(from_str.signature.parameters[0].constraints.contains(&"valid:urn:aa:a".to_string()));
+        assert!(from_str.signature.parameters[0].constraints.contains(&"eq:urn:aa:a".to_string()));
+        assert!(from_str.signature.constructor_args[0].constraints.contains(&"length == 16".to_string()));
+
+        let new_fn = doc.targets.iter().find(|t| t.id == "Demo\\Urn::new").unwrap();
+        assert!(new_fn.signature.parameters[0].constraints.contains(&"forward:Urn::fromString:0".to_string()));
+
+        // Verify balanced-paren default initializer `= new DefaultContext()` in `of(...)` was parsed as both target and static factory
+        let of_fn = doc.targets.iter().find(|t| t.id == "Demo\\Urn::of").unwrap();
+        assert_eq!(of_fn.signature.parameters.len(), 3);
+        assert!(of_fn.signature.parameters[1].constraints.contains(&"lookup_key:currencyData".to_string()));
+        assert!(of_fn.signature.static_factories.iter().any(|f| f.name == "of"));
     }
 }

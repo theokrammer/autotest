@@ -219,6 +219,7 @@ impl TsPrecheckExtractor {
         source: &str,
     ) -> Result<(Vec<TsClassMetadata>, Vec<String>, Vec<TsFunctionMetadata>), TsExtractorError> {
         let clean_source = Self::strip_decorators(&Self::strip_comments(source));
+        let regex_consts = Self::harvest_ts_regex_consts(&clean_source);
 
         let mut interfaces = Vec::new();
         let iface_re = Regex::new(r"export\s+interface\s+(\w+)").unwrap();
@@ -300,6 +301,12 @@ impl TsPrecheckExtractor {
                     }
                     if let Some(params_str) = Self::extract_balanced_parens(&class_body[full.end() - 1..]) {
                         constructor_params = Self::parse_parameters(&params_str);
+                        let after_ctor_parens = (full.end() - 1) + params_str.len() + 2;
+                        if after_ctor_parens <= class_body.len() {
+                            if let Some(ctor_body) = Self::extract_braced_block(&class_body[after_ctor_parens..]) {
+                                Self::extract_branch_constraints_with_regex(&ctor_body, &mut constructor_params, &regex_consts);
+                            }
+                        }
 
                         // Parameter properties (e.g. constructor(public name: string, private id: number))
                         for raw_param in Self::split_top_level_commas(&params_str) {
@@ -402,7 +409,29 @@ impl TsPrecheckExtractor {
                 let method_body = Self::extract_braced_block(&class_body[body_brace_idx..])
                     .unwrap_or_default();
 
-                Self::extract_branch_constraints(&method_body, &mut parameters);
+                Self::extract_branch_constraints_with_regex(&method_body, &mut parameters, &regex_consts);
+
+                // Sync static factory signature with full body-extracted parameter constraints
+                if is_public && is_static {
+                    let is_factory_ret = return_type
+                        .as_deref()
+                        .map(|rt| rt == class_name || rt == "Self" || rt == "this")
+                        .unwrap_or(false)
+                        || matches!(
+                            method_name.as_str(),
+                            "create" | "from" | "of" | "fromISO" | "fromSQL" | "fromHTTP" | "fromRFC2822"
+                        );
+                    if is_factory_ret {
+                        if let Some(existing_f) = static_factories.iter_mut().find(|f| f.name == method_name) {
+                            existing_f.parameters = parameters.clone();
+                        } else {
+                            static_factories.push(FactorySignature {
+                                name: method_name.clone(),
+                                parameters: parameters.clone(),
+                            });
+                        }
+                    }
+                }
 
                 let mut detected_side_effects = Self::detect_side_effects(&method_body);
                 if class_body.contains("randomStringGenerator(")
@@ -484,7 +513,7 @@ impl TsPrecheckExtractor {
 
             let mut parameters = Self::parse_parameters(&raw_params);
             let fn_body = Self::extract_braced_block(&clean_source[body_brace_idx..]).unwrap_or_default();
-            Self::extract_branch_constraints(&fn_body, &mut parameters);
+            Self::extract_branch_constraints_with_regex(&fn_body, &mut parameters, &regex_consts);
             let mut detected_side_effects = Self::detect_side_effects(&fn_body);
             if fn_name.to_lowercase().contains("random")
                 && !detected_side_effects.iter().any(|e| e.effect_type == "rng")
@@ -531,7 +560,7 @@ impl TsPrecheckExtractor {
             }
             let raw_params = f_cap.get(3).map_or_else(|| f_cap.get(4).map_or("", |m| m.as_str()), |m| m.as_str());
             let ret_type = f_cap.get(5).map(|m| m.as_str().trim().to_string());
-            let parameters = Self::parse_parameters(raw_params);
+            let mut parameters = Self::parse_parameters(raw_params);
 
             let fn_start = f_cap.get(0).unwrap().end();
             let has_brace = f_cap.get(6).is_some();
@@ -540,6 +569,7 @@ impl TsPrecheckExtractor {
             } else {
                 clean_source[fn_start..].lines().next().unwrap_or("").to_string()
             };
+            Self::extract_branch_constraints_with_regex(&fn_body, &mut parameters, &regex_consts);
             let mut detected_side_effects = Self::detect_side_effects(&fn_body);
             if fn_name.to_lowercase().contains("random")
                 && !detected_side_effects.iter().any(|e| e.effect_type == "rng")
@@ -775,7 +805,38 @@ impl TsPrecheckExtractor {
         parameters
     }
 
+    fn harvest_ts_regex_consts(source: &str) -> BTreeMap<String, String> {
+        let mut map = BTreeMap::new();
+        let rx_re = Regex::new(
+            r#"(?m)^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z0-9_]+)\s*=\s*(?:/([^/\n\\]+(?:\\.[^/\n\\]*)*)/[gimsuy]*|(?:new\s+)?RegExp\(\s*['"`]([^'"`\n]+)['"`]\s*\))"#
+        ).unwrap();
+        for cap in rx_re.captures_iter(source) {
+            let name = cap[1].to_string();
+            let raw_pat = cap.get(2).or_else(|| cap.get(3)).map(|m| m.as_str()).unwrap_or("");
+            // Skip template string interpolations `${...}` unless simple
+            let cleaned_pat = if raw_pat.contains("${") {
+                let re_interp = Regex::new(r"\$\{[^}]+\}").unwrap();
+                re_interp.replace_all(raw_pat, "").to_string()
+            } else {
+                raw_pat.to_string()
+            };
+            if let Some(sample) = autotest_core::sample_from_regex(&cleaned_pat) {
+                map.insert(name, sample);
+            }
+        }
+        map
+    }
+
+    #[allow(dead_code)]
     fn extract_branch_constraints(body: &str, params: &mut [ParameterDefinition]) {
+        Self::extract_branch_constraints_with_regex(body, params, &BTreeMap::new());
+    }
+
+    fn extract_branch_constraints_with_regex(
+        body: &str,
+        params: &mut [ParameterDefinition],
+        regex_consts: &BTreeMap<String, String>,
+    ) {
         let builtin_props = [
             "length", "map", "filter", "forEach", "push", "pop", "slice", "splice",
             "reduce", "find", "some", "every", "includes", "indexOf", "lastIndexOf",
@@ -793,6 +854,123 @@ impl TsPrecheckExtractor {
             }
             let escaped = regex::escape(&param.name);
             let mut added = 0usize;
+
+            // 1. Generalized string/array length comparison: `param.length === N` / `param.length !== N`
+            if let Ok(len_re) = Regex::new(&format!(r"\b{}\.length\s*([!=]==?|[<>]=?)\s*(\d+)", escaped)) {
+                for l_cap in len_re.captures_iter(body) {
+                    let op = &l_cap[1];
+                    if let Ok(n) = l_cap[2].parse::<usize>() {
+                        let target_len = if op == ">" || op == "<=" { n + 1 } else { n };
+                        if target_len > 0 && target_len <= 1024 {
+                            let c = format!("length == {}", target_len);
+                            if !param.constraints.contains(&c) {
+                                param.constraints.push(c);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. Regex constant & inline literal matching: `rx.exec(param)`, `rx.test(param)`, `param.match(rx)`
+            if let Ok(rx_call_re) = Regex::new(&format!(
+                r"\b([A-Za-z0-9_]+)\.(?:exec|test)\s*\(\s*{}\b|\b{}\.match\s*\(\s*([A-Za-z0-9_]+)\s*\)",
+                escaped, escaped
+            )) {
+                for r_cap in rx_call_re.captures_iter(body) {
+                    if let Some(rx_name) = r_cap.get(1).or_else(|| r_cap.get(2)) {
+                        if let Some(sample) = regex_consts.get(rx_name.as_str()) {
+                            let v = format!("valid:{}", sample);
+                            let eq = format!("eq:{}", sample);
+                            if !param.constraints.contains(&v) {
+                                param.constraints.push(v);
+                            }
+                            if !param.constraints.contains(&eq) {
+                                param.constraints.push(eq);
+                                added += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            if let Ok(rx_lit_re) = Regex::new(&format!(
+                r"/([^/\n\\]+(?:\\.[^/\n\\]*)*)/[gimsuy]*\.(?:exec|test)\s*\(\s*{}\b|\b{}\.match\s*\(\s*/([^/\n\\]+(?:\\.[^/\n\\]*)*)/",
+                escaped, escaped
+            )) {
+                for r_cap in rx_lit_re.captures_iter(body) {
+                    if let Some(pat) = r_cap.get(1).or_else(|| r_cap.get(2)) {
+                        if let Some(sample) = autotest_core::sample_from_regex(pat.as_str()) {
+                            let v = format!("valid:{}", sample);
+                            let eq = format!("eq:{}", sample);
+                            if !param.constraints.contains(&v) {
+                                param.constraints.push(v);
+                            }
+                            if !param.constraints.contains(&eq) {
+                                param.constraints.push(eq);
+                                added += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            // Parser table helpers like `parse(param, [isoYmdRegex, ...])`
+            if !regex_consts.is_empty() && body.contains(&format!("parse({},", param.name)) {
+                for (rx_name, sample) in regex_consts {
+                    if body.contains(rx_name) || added == 0 {
+                        let v = format!("valid:{}", sample);
+                        let eq = format!("eq:{}", sample);
+                        if !param.constraints.contains(&v) {
+                            param.constraints.push(v);
+                        }
+                        if !param.constraints.contains(&eq) {
+                            param.constraints.push(eq);
+                            added += 1;
+                            if added >= 2 {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. Static lookup-table key accesses: `TABLE[param]`, `TABLE.get(param)`, `param in TABLE`
+            if let Ok(tbl_re) = Regex::new(&format!(
+                r"\b([A-Za-z_][A-Za-z0-9_]*)\[\s*{}\s*\]|\b([A-Za-z_][A-Za-z0-9_]*)\.(?:get|has)\s*\(\s*{}\s*\)|\b{}\s+in\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+                escaped, escaped, escaped
+            )) {
+                for t_cap in tbl_re.captures_iter(body) {
+                    if let Some(t_name) = t_cap.get(1).or_else(|| t_cap.get(2)).or_else(|| t_cap.get(3)) {
+                        let tn = t_name.as_str();
+                        if !matches!(tn, "this" | "Object" | "Array" | "Reflect" | "Math" | "JSON") {
+                            let c = format!("lookup_key:{}", tn);
+                            if !param.constraints.contains(&c) {
+                                param.constraints.push(c);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. Inter-procedural call forwarding: `callee(..., param, ...)`
+            if let Ok(call_re) = Regex::new(r"(?:this\.|[A-Za-z0-9_]+\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(([^()]{1,240})\)") {
+                for c_cap in call_re.captures_iter(body) {
+                    let callee = &c_cap[1];
+                    if matches!(
+                        callee,
+                        "if" | "while" | "for" | "switch" | "catch" | "return" | "typeof" | "Array" | "Object" | "String" | "Number" | "Boolean" | "isNaN" | "parseInt" | "parseFloat"
+                    ) {
+                        continue;
+                    }
+                    let args_slice = &c_cap[2];
+                    for (arg_idx, raw_arg) in Self::split_top_level_commas(args_slice).iter().enumerate() {
+                        if raw_arg.trim() == param.name {
+                            let fwd = format!("forward:{}:{}", callee, arg_idx);
+                            if !param.constraints.contains(&fwd) {
+                                param.constraints.push(fwd);
+                            }
+                        }
+                    }
+                }
+            }
 
             // Match `param === 'lit'` or `param == "lit"` or `param !== 'lit'`
             if let Ok(eq_re) = Regex::new(&format!(r"\b{}\s*[!=]==?\s*['\x22]([A-Za-z0-9_./:-]{{1,32}})['\x22]", escaped)) {
@@ -1518,5 +1696,37 @@ mod tests {
         assert_eq!(uc.signature.parameters.len(), 2);
         assert_eq!(uc.signature.parameters[0].name, "iocContainer");
         assert_eq!(uc.signature.parameters[0].param_type, "{ get(someClass: any): any }");
+    }
+
+    #[test]
+    fn test_ts_static_constraint_mechanisms_length_regex_lookup_and_forwarding() {
+        let code = r#"
+            const sqlYmdRegex = /(\d{4})-(\d\d)-(\d\d)/;
+            const ALGORITHMS = { HS256: "sha256", RS256: "rsa" };
+
+            export function parseSQL(text: string): object {
+                if (sqlYmdRegex.exec(text)) {
+                    return {};
+                }
+                return {};
+            }
+
+            export function fromSQL(text: string, key: string, alg: string): object {
+                if (key.length !== 16) {
+                    throw new Error("bad key");
+                }
+                const found = ALGORITHMS[alg];
+                return parseSQL(text);
+            }
+        "#;
+        let doc = TsPrecheckExtractor::extract_source("src/parser.ts", code).unwrap();
+        let parse_sql = doc.targets.iter().find(|t| t.id == "parseSQL").unwrap();
+        assert!(parse_sql.signature.parameters[0].constraints.contains(&"valid:2024-01-01".to_string()));
+        assert!(parse_sql.signature.parameters[0].constraints.contains(&"eq:2024-01-01".to_string()));
+
+        let from_sql = doc.targets.iter().find(|t| t.id == "fromSQL").unwrap();
+        assert!(from_sql.signature.parameters[0].constraints.contains(&"forward:parseSQL:0".to_string()));
+        assert!(from_sql.signature.parameters[1].constraints.contains(&"length == 16".to_string()));
+        assert!(from_sql.signature.parameters[2].constraints.contains(&"lookup_key:ALGORITHMS".to_string()));
     }
 }
