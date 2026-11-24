@@ -1,9 +1,9 @@
 name: Split PHPUnit Subdirectory to Read-Only Mirror
 
-on:
-  push:
-    branches: [main]
-    tags: ['v*']
+  #on:
+  #push:
+  #    branches: [main]
+  #    tags: ['v*']
 
 jobs:
   split-phpunit:
